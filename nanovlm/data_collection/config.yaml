@@ -1,0 +1,60 @@
+# Data Collection Configuration for MiniGrid Action Prediction
+
+# Environment settings
+env:
+  id: "MiniGrid-Empty-8x8-v0"
+  seed: 0
+
+# Data collection parameters
+collection:
+  num_episodes: 10
+  max_steps_per_episode: null  # null means no limit
+  save_frames: true
+  mode: "action"  # "action" or "text_action"
+
+# Output settings
+output:
+  dir: "data/minigrid_sft"
+  
+# Processing
+processing:
+  num_workers: 1
+
+# Presets for quick config switching
+# Usage: python -m nanovlm.data_collection.collect_data --config small
+presets:
+  small:
+    env:
+      id: "MiniGrid-Empty-8x8-v0"
+    collection:
+      num_episodes: 10
+      max_steps_per_episode: 50
+    output:
+      dir: "data/minigrid_small"
+  
+  medium:
+    env:
+      id: "MiniGrid-Empty-16x16-v0"
+    collection:
+      num_episodes: 50
+      max_steps_per_episode: 200
+    output:
+      dir: "data/minigrid_medium"
+  
+  large:
+    env:
+      id: "MiniGrid-Empty-16x16-v0"
+    collection:
+      num_episodes: 200
+      max_steps_per_episode: null
+    output:
+      dir: "data/minigrid_large"
+  
+  dev:
+    env:
+      id: "MiniGrid-Empty-8x8-v0"
+    collection:
+      num_episodes: 1
+      max_steps_per_episode: 10
+    output:
+      dir: "data/minigrid_dev"
