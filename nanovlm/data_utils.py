@@ -3,17 +3,18 @@ from typing import Dict, Optional, Tuple, Type, Union
 
 import logging
 from torch.utils.data import Dataset, DataLoader
+from transformers import PreTrainedTokenizer
 
-from .processors import get_tokenizer, get_image_processor
-from .dataset import MiniGridSFTDataset
-from .collators import PaddedCollatorForActionPrediction, PaddedCollatorForLanguageModeling
+from processors import get_image_processor
+from dataset import MiniGridSFTDataset
+from collators import PaddedCollatorForActionPrediction, PaddedCollatorForLanguageModeling
 
 logger = logging.getLogger(__name__)
 
 
 def get_dataset_and_collator(
     dataset_path: Union[str, Path],
-    model_name: str,
+    tokenizer: PreTrainedTokenizer,
     image_processor_config: Dict[str, int],
     mp_image_token_length: int = 256,
     mode: str = "action",
@@ -24,7 +25,7 @@ def get_dataset_and_collator(
     """
     Args:
         dataset_path: Path to JSONL file with training examples
-        model_name: HuggingFace model name for tokenizer loading
+        tokenizer: Pre-initialized tokenizer instance
         image_processor_config: Dict with keys:
             - 'max_img_size': Maximum image dimension (recommended: 224 for simple envs, 448 for complex)
             - 'splitted_image_size': Patch size (recommended: 112 for simple envs, 224 for complex)
@@ -42,11 +43,6 @@ def get_dataset_and_collator(
     if not dataset_path.exists():
         raise FileNotFoundError(f"Dataset not found: {dataset_path}")
     
-    logger.info(f"Loading tokenizer from {model_name}")
-    tokenizer = get_tokenizer(
-        model_name=model_name,
-        trust_remote_code=True
-    )
     logger.info("Creating image processor...")
     image_processor = get_image_processor(
         max_img_size=image_processor_config["max_img_size"],
@@ -85,7 +81,6 @@ def get_dataset_and_collator(
         raise ValueError(f"Unknown collator type: {collator_type}")
     
     logger.info(f"✓ Dataset loaded with {len(dataset)} examples")
-    logger.info(f"✓ Tokenizer: {model_name}")
     logger.info(f"✓ Dataset mode: {mode}")
     logger.info(f"✓ Pad token ID: {tokenizer.pad_token_id}")
     
@@ -94,7 +89,7 @@ def get_dataset_and_collator(
 
 def create_dataloader(
     dataset_path: Union[str, Path],
-    model_name: str,
+    tokenizer: PreTrainedTokenizer,
     image_processor_config: Dict[str, int],
     batch_size: int = 8,
     num_workers: int = 4,
@@ -107,7 +102,7 @@ def create_dataloader(
     """
     Args:
         dataset_path: Path to JSONL dataset
-        model_name: HuggingFace model name
+        tokenizer: Pre-initialized tokenizer instance
         image_processor_config: Image processor configuration
         batch_size: Batch size
         num_workers: Number of workers for data loading
@@ -123,7 +118,7 @@ def create_dataloader(
     
     dataset, collator = get_dataset_and_collator(
         dataset_path=dataset_path,
-        model_name=model_name,
+        tokenizer=tokenizer,
         image_processor_config=image_processor_config,
         mp_image_token_length=mp_image_token_length,
         mode=mode,

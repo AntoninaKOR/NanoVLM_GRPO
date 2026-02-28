@@ -79,19 +79,31 @@ class MiniGridExpertRunner:
 
 
 def collect_data(
-    env_id: str,
+    env_ids: List[str],
     num_episodes: int,
     output_dir: Path,
     seed: int = 0,
     mode: str = "action",
     max_steps: Optional[int] = None,
 ) -> List[Dict[str, object]]:
+    """Collect expert trajectories from one or more MiniGrid EmptyEnv sizes.
+
+    Images are saved at their native render resolution. Resizing to the model's
+    expected input size is handled by the NanoVLM image processor at training time.
+
+    Args:
+        env_ids: List of Gymnasium env IDs to collect from (e.g.
+            ["MiniGrid-Empty-5x5-v0", "MiniGrid-Empty-8x8-v0"]).
+        num_episodes: Episodes to collect *per env*.
+        output_dir: Root directory for images and dataset.jsonl.
+        seed: Base random seed; each episode offsets by episode index.
+        mode: "action" for action-name labels; "text_action" for description+action.
+        max_steps: Cap steps per episode (None = unlimited).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     images_dir = output_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    env = gym.make(env_id, render_mode="rgb_array")
-    planner = Dijkstra(env)
     examples: List[Dict[str, object]] = []
 
     prompt = (
@@ -100,63 +112,72 @@ def collect_data(
         else "Describe what you see and what action the agent should take."
     )
 
-    for ep in range(num_episodes):
-        obs, _ = env.reset(seed=seed + ep)
-        path: List[Tuple[int, int]] = []
-        path_idx = 0
-        steps = 0
+    action_names = {
+        0: "turn_left",
+        1: "turn_right",
+        2: "forward",
+        3: "pickup",
+        4: "drop",
+        5: "toggle",
+        6: "done",
+    }
 
-        while True:
-            if not path or path_idx >= len(path) - 1:
-                path = planner.shortest_path()
-                path_idx = 0
-            if not path:
-                break
+    for env_id in env_ids:
+        env = gym.make(env_id, render_mode="rgb_array")
+        planner = Dijkstra(env)
+        # Sanitise env_id to a safe filename prefix (e.g. minigrid_empty_8x8_v0)
+        env_tag = env_id.lower().replace("/", "_").replace("-", "_")
 
-            next_pos = path[min(path_idx + 1, len(path) - 1)]
-            action = action_to_next(env, next_pos)
-            if action is None:
-                break
+        for ep in range(num_episodes):
+            obs, _ = env.reset(seed=seed + ep)
+            path: List[Tuple[int, int]] = []
+            path_idx = 0
+            steps = 0
 
-            # Use the rendered RGB frame so VLM sees natural pixel input
-            frame = env.render()
-            image_path = images_dir / f"ep{ep}_step{steps}.png"
-            Image.fromarray(frame).save(image_path)
+            while True:
+                if not path or path_idx >= len(path) - 1:
+                    path = planner.shortest_path()
+                    path_idx = 0
+                if not path:
+                    break
 
-            action_name = {
-                0: "turn_left",
-                1: "turn_right",
-                2: "forward",
-                3: "pickup",
-                4: "drop",
-                5: "toggle",
-                6: "done",
-            }[int(action)]
-            if mode == "action":
-                target = action_name
-            else:
-                target = f"The agent needs to navigate to the goal. Action: {action_name}"
+                next_pos = path[min(path_idx + 1, len(path) - 1)]
+                action = action_to_next(env, next_pos)
+                if action is None:
+                    break
 
-            examples.append(
-                {
-                    "image": str(image_path),
-                    "prompt": prompt,
-                    "target": target,
-                    "action": int(action),
-                    "episode": ep,
-                    "step": steps,
-                }
-            )
+                # Save the raw rendered frame; the NanoVLM processor handles resizing.
+                frame = env.render()
+                image_path = images_dir / f"{env_tag}_ep{ep}_step{steps}.png"
+                Image.fromarray(frame).save(image_path)
 
-            obs, _, terminated, truncated, _ = env.step(action)
-            steps += 1
-            path_idx = min(path_idx + 1, len(path) - 1)
-            if max_steps is not None and steps >= max_steps:
-                break
-            if terminated or truncated:
-                break
+                action_name = action_names[int(action)]
+                if mode == "action":
+                    target = action_name
+                else:
+                    target = f"The agent needs to navigate to the goal. Action: {action_name}"
 
-    env.close()
+                examples.append(
+                    {
+                        "image": str(image_path),
+                        "prompt": prompt,
+                        "target": target,
+                        "action": int(action),
+                        "env_id": env_id,
+                        "episode": ep,
+                        "step": steps,
+                    }
+                )
+
+                obs, _, terminated, truncated, _ = env.step(action)
+                steps += 1
+                path_idx = min(path_idx + 1, len(path) - 1)
+                if max_steps is not None and steps >= max_steps:
+                    break
+                if terminated or truncated:
+                    break
+
+        env.close()
 
     jsonl_path = output_dir / "dataset.jsonl"
     with jsonl_path.open("w", encoding="utf-8") as handle:
@@ -229,12 +250,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--preset",
-        choices=["small", "medium", "large", "dev"],
+        choices=["small", "medium", "large", "dev", "random", "curriculum"],
         default=None,
         help="Use preset config (overrides config file settings)",
     )
-    parser.add_argument("--env-id", default=None, help="Override env_id from config")
-    parser.add_argument("--episodes", type=int, default=None, help="Override num_episodes")
+    parser.add_argument(
+        "--env-ids",
+        nargs="+",
+        default=None,
+        metavar="ENV_ID",
+        help="One or more env IDs to collect from, e.g. MiniGrid-Empty-5x5-v0 MiniGrid-Empty-8x8-v0",
+    )
+    parser.add_argument("--episodes", type=int, default=None, help="Override num_episodes (per env)")
     parser.add_argument("--seed", type=int, default=None, help="Override seed")
     parser.add_argument("--max-steps", type=int, default=None, help="Override max_steps")
     parser.add_argument("--mode", choices=["action", "text_action"], default=None, help="Override mode")
@@ -248,8 +275,8 @@ def main() -> None:
     kwargs = config_to_args(config)
     
     # Override with CLI arguments if provided
-    if args.env_id:
-        kwargs["env_id"] = args.env_id
+    if args.env_ids:
+        kwargs["env_ids"] = args.env_ids
     if args.episodes:
         kwargs["num_episodes"] = args.episodes
     if args.seed is not None:
@@ -262,7 +289,7 @@ def main() -> None:
         kwargs["output_dir"] = Path(args.out_dir)
 
     collect_data(**kwargs)
-    print(f"Saved dataset to {kwargs['output_dir']}")
+    print(f"Saved {len(kwargs.get('env_ids', []))} env(s), dataset at {kwargs['output_dir']}")
 
 
 if __name__ == "__main__":

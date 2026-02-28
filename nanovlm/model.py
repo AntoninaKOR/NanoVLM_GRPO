@@ -4,11 +4,11 @@ from peft import LoraConfig, get_peft_model
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoProcessor, AutoTokenizer, AutoModelForCausalLM, AutoImageProcessor, AutoConfig
+from transformers import AutoProcessor, AutoTokenizer, AutoModelForCausalLM, AutoImageProcessor, AutoConfig, PreTrainedTokenizer
 from PIL import Image
 import numpy as np
 
-from processors import get_image_processor, get_image_string, get_tokenizer
+from processors import get_image_processor, get_image_string
 
 # MiniGrid action space
 ACTIONS = {
@@ -36,6 +36,7 @@ class NanoVLMActionPredictor(nn.Module):
     def __init__(
         self,
         model_name: str = "qnguyen3/nanoLLaVA-1.5",
+        tokenizer: PreTrainedTokenizer = None,
         mode: str = "action", 
         use_lora: bool = True,
         lora_r: int = 8,
@@ -44,26 +45,14 @@ class NanoVLMActionPredictor(nn.Module):
         splitted_image_size: int = 8,
     ):
         super().__init__()
+        if tokenizer is None:
+            raise ValueError("tokenizer must be provided (dependency injection pattern)")
+        
         self.model_name = model_name
+        self.tokenizer = tokenizer
         self.mode = mode
         self.max_img_size = max_img_size
-        self.splitted_image_size = splitted_image_size  
-   
-        special_tokens = {
-            "image_token": "<image>",
-            "global_image_token": "<global_image>",
-            **{f"r{i}c{j}": f"<r{i}c{j}>" for i in range(1, 9) for j in range(1, 9)},
-        }
-        
-        # Add action tokens to dictionary
-        for action in ACTIONS.values():
-            special_tokens[f"<{action}>"] = f"<{action}>"
-     
-        self.tokenizer = get_tokenizer(
-            model_name,
-            extra_special_tokens=special_tokens,
-            trust_remote_code=True
-        )
+        self.splitted_image_size = splitted_image_size
         
         config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         config.pad_token_id = self.tokenizer.pad_token_id
@@ -304,9 +293,34 @@ def prepare_training_data(
 
 if __name__ == "__main__":
     print("Testing NanoVLM action predictor...")
+    from processors import get_tokenizer
+    
+    model_name = "qnguyen3/nanoLLaVA-1.5"
+    
+    # Initialize tokenizer with action special tokens
+    special_tokens = {
+        "image_token": "<image>",
+        "global_image_token": "<global_image>",
+        **{f"r{i}c{j}": f"<r{i}c{j}>" for i in range(1, 9) for j in range(1, 9)},
+        **{f"<{action}>": f"<{action}>" for action in ACTIONS.values()},
+    }
+    
+    tokenizer = get_tokenizer(
+        name=model_name,
+        extra_special_tokens=special_tokens,
+        trust_remote_code=True
+    )
+    
     dummy_image = Image.new("RGB", (32, 32), color=(73, 109, 137))
     
-    model = NanoVLMActionPredictor(mode="action", use_lora=False, max_img_size = 32, splitted_image_size = 8)  # Use smaller sizes for testing with dummy image
+    model = NanoVLMActionPredictor(
+        model_name=model_name,
+        tokenizer=tokenizer,
+        mode="action",
+        use_lora=False,
+        max_img_size=32,
+        splitted_image_size=8
+    )
     print(f"Model loaded: {model.model_name}")
     print(f"Mode: {model.mode}")
     print(f"Action tokens: {model.action_token_ids}")

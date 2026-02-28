@@ -2,7 +2,12 @@
 
 # Environment settings
 env:
-  id: "MiniGrid-Empty-8x8-v0"
+  # List of env IDs to collect from. Episodes are collected per-env.
+  # Fixed-start:  MiniGrid-Empty-<N>x<N>-v0   (N: 5, 6, 8, 16)
+  # Random-start: MiniGrid-Empty-Random-5x5-v0, MiniGrid-Empty-Random-6x6-v0
+  #   (agent spawns at a random position each episode; goal stays bottom-right)
+  ids:
+    - "MiniGrid-Empty-8x8-v0"
   seed: 0
 
 # Data collection parameters
@@ -19,13 +24,15 @@ output:
 # Processing
 processing:
   num_workers: 1
+  image_size: null
 
 # Presets for quick config switching
 # Usage: python -m nanovlm.data_collection.collect_data --config small
 presets:
   small:
     env:
-      id: "MiniGrid-Empty-8x8-v0"
+      ids:
+        - "MiniGrid-Empty-8x8-v0"
     collection:
       num_episodes: 10
       max_steps_per_episode: 50
@@ -43,18 +50,49 @@ presets:
   
   large:
     env:
-      id: "MiniGrid-Empty-16x16-v0"
+      ids:
+        - "MiniGrid-Empty-16x16-v0"
     collection:
       num_episodes: 200
       max_steps_per_episode: null
     output:
-      dir: "data/minigrid_large"
+      dir: "nanovlm/data/minigrid_large"
   
   dev:
     env:
-      id: "MiniGrid-Empty-8x8-v0"
+      ids:
+        - "MiniGrid-Empty-8x8-v0"
     collection:
       num_episodes: 1
       max_steps_per_episode: 10
     output:
-      dir: "data/minigrid_dev"
+      dir: "nanovlm/data/minigrid_dev"
+
+  # Random-start: agent position is randomised each episode.
+  # The Dijkstra planner re-plans from the actual agent_pos, so no code changes needed.
+  random:
+    env:
+      ids:
+        - "MiniGrid-Empty-Random-5x5-v0"
+        - "MiniGrid-Empty-Random-6x6-v0"
+    collection:
+      num_episodes: 50
+      max_steps_per_episode: null
+    output:
+      dir: "nanovlm/data/minigrid_random"
+
+  # Curriculum: fixed + random-start envs across multiple sizes.
+  # Images are saved at native resolution; the processor normalises at train time.
+  curriculum:
+    env:
+      ids:
+        - "MiniGrid-Empty-5x5-v0"
+        - "MiniGrid-Empty-8x8-v0"
+        - "MiniGrid-Empty-16x16-v0"
+        - "MiniGrid-Empty-Random-5x5-v0"
+        - "MiniGrid-Empty-Random-6x6-v0"
+    collection:
+      num_episodes: 30
+      max_steps_per_episode: null
+    output:
+      dir: "nanovlm/data/minigrid_curriculum"

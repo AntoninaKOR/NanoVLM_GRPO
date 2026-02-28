@@ -48,9 +48,15 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
 
 def config_to_args(config: Dict[str, Any]) -> Dict[str, Any]:
     """Convert config dict to arguments for collect_data function."""
+    env_section = config["env"]
+    if "ids" in env_section:
+        env_ids = env_section["ids"]
+    else:
+        env_ids = [env_section["id"]]
+
     return {
-        "env_id": config["env"]["id"],
-        "seed": config["env"]["seed"],
+        "env_ids": env_ids,
+        "seed": env_section["seed"],
         "num_episodes": config["collection"]["num_episodes"],
         "max_steps": config["collection"]["max_steps_per_episode"],
         "output_dir": Path(config["output"]["dir"]),
