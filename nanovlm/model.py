@@ -43,6 +43,8 @@ class NanoVLMActionPredictor(nn.Module):
         lora_alpha: int = 16,
         max_img_size: int = 32,
         splitted_image_size: int = 8,
+        mp_image_token_length: int = 2,
+        dtype: str = "float32",
     ):
         super().__init__()
         if tokenizer is None:
@@ -53,14 +55,19 @@ class NanoVLMActionPredictor(nn.Module):
         self.mode = mode
         self.max_img_size = max_img_size
         self.splitted_image_size = splitted_image_size
+        self.mp_image_token_length = mp_image_token_length
         
         config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         config.pad_token_id = self.tokenizer.pad_token_id
         
+        # Convert dtype string to torch dtype
+        dtype_map = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+        torch_dtype = dtype_map.get(dtype, torch.float32)
+        
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             trust_remote_code=True,
-            torch_dtype=torch.float16,
+            torch_dtype=torch_dtype,
             config=config,
         )
         
@@ -176,7 +183,7 @@ class NanoVLMActionPredictor(nn.Module):
         patches, grid_info = self.image_processor(image)
 
         # Build image token string 
-        image_str = get_image_string(self.tokenizer, [grid_info], 2)
+        image_str = get_image_string(self.tokenizer, [grid_info], self.mp_image_token_length)
         text = image_str + prompt
 
         text_inputs = self.tokenizer(
@@ -194,7 +201,7 @@ class NanoVLMActionPredictor(nn.Module):
             for i in range(max_new_tokens):
                 outputs = self.model(
                     input_ids=generated_ids,
-                    attention_mask=torch.ones_like(generated_ids),
+                    attention_mask=attention_mask,
                     return_dict=True,
                     use_cache=False
                 )
@@ -203,6 +210,7 @@ class NanoVLMActionPredictor(nn.Module):
                 # Sample greedy
                 next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
                 generated_ids = torch.cat([generated_ids, next_token], dim=-1)
+                attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
                 if next_token.item() == self.tokenizer.eos_token_id:
                     break
         

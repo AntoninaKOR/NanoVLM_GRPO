@@ -1,0 +1,51 @@
+model:
+  name: "HuggingFaceTB/SmolLM2-360M-Instruct"
+  mode: "action"        # action | text_action
+  dtype: "float32"
+  lora:
+    enabled: true
+    r: 8
+    alpha: 16
+    dropout: 0.05
+    target_modules: [q_proj, v_proj, k_proj, o_proj]
+
+image_processor:
+  max_img_size: 224
+  splitted_image_size: 112
+  mp_image_token_length: 2
+
+dataset:
+  path: "nanovlm/data/minigrid_small/dataset.jsonl"
+  val_split: 0.2
+  max_length: 512
+
+training:
+  method: "sft"         # sft | grpo
+  epochs: 3
+  batch_size: 4
+  lr: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 100
+  max_grad_norm: 1.0
+  seed: 42
+  device: "auto"        # auto | cuda | mps | cpu
+  num_workers: 0
+  save_interval: 1
+  output_dir: "nanovlm/checkpoints/sft_baseline"
+  init_from_checkpoint: null
+
+grpo:
+  num_samples: 4        # candidate actions per state
+  temperature: 0.7
+  kl_coeff: 0.1
+  max_episodes: 1000
+  reward_baseline: "mean"
+
+env:
+  name: "MiniGrid-Empty-8x8-v0"
+  max_steps: 100
+  num_actions: 7
+
+eval:
+  num_episodes: 5
+  max_steps: 20
