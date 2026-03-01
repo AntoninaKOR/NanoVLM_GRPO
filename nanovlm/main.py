@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import gymnasium as gym
+import imageio
 import minigrid  # noqa: F401 — registers MiniGrid envs
+from minigrid.wrappers import RGBImgPartialObsWrapper
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -15,11 +17,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm
 
-from model import NanoVLMActionPredictor, ACTIONS
-from data_utils import get_dataset_and_collator
-from processors import get_tokenizer
-from device_utils import get_device, setup_device
-from config_loader import load_config
+from .model import NanoVLMActionPredictor, ACTIONS
+from .data_utils import get_dataset_and_collator
+from .data_collection.dijkstra import Dijkstra
+from .data_collection.env_utils import action_to_next
+from .processors import get_tokenizer
+from .device_utils import get_device, setup_device
+from .config_loader import load_config
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -122,34 +126,126 @@ def validate(
     return avg_loss, accuracy
 
 
+def save_evaluation_gif(
+    frames: List[np.ndarray],
+    output_path: Path,
+    duration: float = 0.5,
+) -> None:
+    """Save a list of frames as an animated GIF."""
+    if frames:
+        frames_uint8 = [np.uint8(f) if f.dtype != np.uint8 else f for f in frames]
+        imageio.mimwrite(output_path, frames_uint8, duration=duration, loop=0)
+        logger.info(f"GIF saved to {output_path}")
+
+
+def create_grid_gif(
+    episode_frames_list: List[List[np.ndarray]],
+    output_path: Path,
+    duration: float = 0.5,
+    grid_size: Tuple[int, int] = (2, 2),
+) -> None:
+    """Create a GIF with multiple episodes displayed in a grid layout (e.g., 2x2)."""
+    if not episode_frames_list or not episode_frames_list[0]:
+        return
+    
+    # Pad all episodes to the same length (length of longest episode)
+    max_length = max(len(frames) for frames in episode_frames_list)
+    padded_episodes = []
+    for frames in episode_frames_list:
+        if len(frames) < max_length:
+            # Repeat last frame to pad
+            padding = [frames[-1]] * (max_length - len(frames))
+            padded_episodes.append(frames + padding)
+        else:
+            padded_episodes.append(frames)
+    
+    # Create grid frames
+    grid_frames = []
+    for step in range(max_length):
+        # Get frame from each episode at this step
+        grid_row_frames = []
+        for row in range(grid_size[0]):
+            grid_col_frames = []
+            for col in range(grid_size[1]):
+                ep_idx = row * grid_size[1] + col
+                if ep_idx < len(padded_episodes):
+                    frame = padded_episodes[ep_idx][step]
+                    grid_col_frames.append(frame)
+            
+            if grid_col_frames:
+                # Stack frames horizontally
+                row_frame = np.hstack(grid_col_frames)
+                grid_row_frames.append(row_frame)
+        
+        if grid_row_frames:
+            # Stack rows vertically
+            combined_frame = np.vstack(grid_row_frames)
+            grid_frames.append(np.uint8(combined_frame))
+    
+    # Save as GIF
+    if grid_frames:
+        imageio.mimwrite(output_path, grid_frames, duration=duration, loop=0)
+        logger.info(f"Grid GIF saved to {output_path}")
+
+
 def evaluate_in_env(
     model: NanoVLMActionPredictor,
     env_name: str,
     num_episodes: int = 5,
     max_steps: int = 20,
     seed: int = 0,
+    output_dir: Optional[Path] = None,
 ) -> Dict[str, float]:
-    """Run the model in MiniGrid and compute success rate / average return."""
+    """Run the model in MiniGrid and compute success rate / average return. Optionally save GIFs."""
     model.model.eval()
-    env = gym.make(env_name, render_mode="rgb_array")
+    base_env = gym.make(env_name, render_mode="rgb_array")
+    env = RGBImgPartialObsWrapper(base_env, tile_size=8)
+    planner = Dijkstra(base_env)
 
     successes = 0
     total_returns: List[float] = []
     episode_lengths: List[int] = []
+    optimal_matches = 0
+    total_steps = 0
+    episode_gifs: List[Tuple[int, List[np.ndarray]]] = []  # (ep_idx, frames)
 
     for ep in range(num_episodes):
         obs, _ = env.reset(seed=seed + ep)
         ep_return = 0.0
         steps = 0
+        frames = []
+
+        # Capture initial frame
+        if output_dir is not None:
+            frames.append(base_env.render())
 
         for _ in range(max_steps):
-            frame = env.render()
+            path = planner.shortest_path()
+            optimal_action = None
+            if path and len(path) > 1:
+                optimal_action = action_to_next(base_env, path[1])
+
+            frame = obs["image"]  # Partial observation (POMDP)
             action_id = model.predict_action(frame)
+
+            if optimal_action is not None:
+                total_steps += 1
+                if action_id == optimal_action:
+                    optimal_matches += 1
+
             obs, reward, terminated, truncated, _ = env.step(action_id)
             ep_return += reward
             steps += 1
+
+            # Capture frame after action
+            if output_dir is not None:
+                frames.append(base_env.render())
+
             if terminated or truncated:
                 break
+
+        if output_dir is not None:
+            episode_gifs.append((ep, frames))
 
         if ep_return > 0:
             successes += 1
@@ -158,11 +254,23 @@ def evaluate_in_env(
 
     env.close()
 
+    # Save combined GIF for last 4 episodes in 2x2 grid
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Get last 4 episodes
+        last_episodes = episode_gifs[-4:] if len(episode_gifs) > 0 else []
+        if last_episodes:
+            # Extract frames only (remove episode indices)
+            frames_list = [frames for _, frames in last_episodes]
+            gif_path = output_dir / "last_4_episodes_grid.gif"
+            create_grid_gif(frames_list, gif_path, duration=0.5, grid_size=(2, 2))
+
     return {
         "success_rate": successes / max(1, num_episodes),
         "mean_return": float(np.mean(total_returns)),
         "std_return": float(np.std(total_returns)),
         "mean_episode_length": float(np.mean(episode_lengths)),
+        "optimal_action_rate": optimal_matches / max(1, total_steps),
     }
 
 
@@ -173,7 +281,7 @@ def plot_learning_curves(
     """Save learning-curve plots from the collected per-epoch metrics."""
     epochs = [m["epoch"] for m in metrics_log]
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig, axes = plt.subplots(3, 2, figsize=(12, 12))
     fig.suptitle("Learning Curves", fontsize=14)
 
     # --- Loss ---
@@ -220,6 +328,28 @@ def plot_learning_curves(
         )
         ax.set_ylabel("Return")
         ax.set_title("MiniGrid Episode Return (mean ± std)")
+    else:
+        ax.set_visible(False)
+    ax.set_xlabel("Epoch")
+    ax.grid(True, alpha=0.3)
+
+    # --- Mean episode length ---
+    ax = axes[2, 0]
+    if has_env:
+        ax.plot(epochs, [m["mean_episode_length"] for m in metrics_log], "o-", color="tab:purple")
+        ax.set_ylabel("Steps")
+        ax.set_title("Mean Episode Length")
+    else:
+        ax.set_visible(False)
+    ax.set_xlabel("Epoch")
+    ax.grid(True, alpha=0.3)
+
+    # --- Optimal action rate ---
+    ax = axes[2, 1]
+    if has_env:
+        ax.plot(epochs, [m["optimal_action_rate"] for m in metrics_log], "o-", color="tab:cyan")
+        ax.set_ylabel("Rate")
+        ax.set_title("Optimal Action Rate")
     else:
         ax.set_visible(False)
     ax.set_xlabel("Epoch")
@@ -389,18 +519,22 @@ def main():
 
         # Evaluate in MiniGrid environment
         if eval_episodes > 0:
+            # Create GIF output directory for this epoch
+            gif_dir = output_dir / f"gifs_epoch_{epoch}"
             env_metrics = evaluate_in_env(
                 model,
                 env_name=env_cfg["name"],
                 num_episodes=eval_episodes,
                 max_steps=eval_max_steps,
                 seed=train_cfg["seed"],
+                output_dir=gif_dir,
             )
             metrics.update(env_metrics)
             logger.info(
                 f"Env eval: success_rate={env_metrics['success_rate']:.2f}, "
                 f"mean_return={env_metrics['mean_return']:.4f}, "
-                f"mean_ep_len={env_metrics['mean_episode_length']:.1f}"
+                f"mean_ep_len={env_metrics['mean_episode_length']:.1f}, "
+                f"optimal_action_rate={env_metrics['optimal_action_rate']:.2f}"
             )
 
         metrics_log.append(metrics)

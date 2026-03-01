@@ -15,7 +15,6 @@ collection:
   num_episodes: 10
   max_steps_per_episode: null  # null means no limit
   save_frames: true
-  mode: "action"  # "action" or "text_action"
 
 # Output settings
 output:

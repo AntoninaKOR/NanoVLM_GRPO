@@ -5,10 +5,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
+from minigrid.wrappers import RGBImgPartialObsWrapper
 from PIL import Image
 
 from .dijkstra import Dijkstra
-from .env_utils import action_to_next
+from .env_utils import action_to_next, generate_state_description
 from .config_loader import load_config, config_to_args
 
 
@@ -83,21 +84,18 @@ def collect_data(
     num_episodes: int,
     output_dir: Path,
     seed: int = 0,
-    mode: str = "action",
     max_steps: Optional[int] = None,
 ) -> List[Dict[str, object]]:
     """Collect expert trajectories from one or more MiniGrid EmptyEnv sizes.
 
-    Images are saved at their native render resolution. Resizing to the model's
-    expected input size is handled by the NanoVLM image processor at training time.
+    Each record stores the action name in ``target`` and a state-aware text
+    description in ``description``.
 
     Args:
-        env_ids: List of Gymnasium env IDs to collect from (e.g.
-            ["MiniGrid-Empty-5x5-v0", "MiniGrid-Empty-8x8-v0"]).
+        env_ids: List of Gymnasium env IDs to collect from.
         num_episodes: Episodes to collect *per env*.
         output_dir: Root directory for images and dataset.jsonl.
         seed: Base random seed; each episode offsets by episode index.
-        mode: "action" for action-name labels; "text_action" for description+action.
         max_steps: Cap steps per episode (None = unlimited).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -106,11 +104,7 @@ def collect_data(
 
     examples: List[Dict[str, object]] = []
 
-    prompt = (
-        "What action should the agent take to reach the goal?"
-        if mode == "action"
-        else "Describe what you see and what action the agent should take."
-    )
+    prompt = "What action should the agent take to reach the goal?"
 
     action_names = {
         0: "turn_left",
@@ -123,8 +117,9 @@ def collect_data(
     }
 
     for env_id in env_ids:
-        env = gym.make(env_id, render_mode="rgb_array")
-        planner = Dijkstra(env)
+        base_env = gym.make(env_id, render_mode="rgb_array")
+        env = RGBImgPartialObsWrapper(base_env, tile_size=8)
+        planner = Dijkstra(base_env)
         # Sanitise env_id to a safe filename prefix (e.g. minigrid_empty_8x8_v0)
         env_tag = env_id.lower().replace("/", "_").replace("-", "_")
 
@@ -146,22 +141,19 @@ def collect_data(
                 if action is None:
                     break
 
-                # Save the raw rendered frame; the NanoVLM processor handles resizing.
-                frame = env.render()
+                frame = obs["image"]
                 image_path = images_dir / f"{env_tag}_ep{ep}_step{steps}.png"
                 Image.fromarray(frame).save(image_path)
 
                 action_name = action_names[int(action)]
-                if mode == "action":
-                    target = action_name
-                else:
-                    target = f"The agent needs to navigate to the goal. Action: {action_name}"
+                description = generate_state_description(base_env)
 
                 examples.append(
                     {
                         "image": str(image_path),
                         "prompt": prompt,
-                        "target": target,
+                        "target": action_name,
+                        "description": description,
                         "action": int(action),
                         "env_id": env_id,
                         "episode": ep,
@@ -264,7 +256,6 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=None, help="Override num_episodes (per env)")
     parser.add_argument("--seed", type=int, default=None, help="Override seed")
     parser.add_argument("--max-steps", type=int, default=None, help="Override max_steps")
-    parser.add_argument("--mode", choices=["action", "text_action"], default=None, help="Override mode")
     parser.add_argument("--out-dir", type=str, default=None, help="Override output directory")
     args = parser.parse_args()
 
@@ -283,8 +274,6 @@ def main() -> None:
         kwargs["seed"] = args.seed
     if args.max_steps is not None:
         kwargs["max_steps"] = args.max_steps
-    if args.mode:
-        kwargs["mode"] = args.mode
     if args.out_dir:
         kwargs["output_dir"] = Path(args.out_dir)
 

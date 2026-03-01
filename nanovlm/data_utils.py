@@ -5,9 +5,9 @@ import logging
 from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizer
 
-from processors import get_image_processor
-from dataset import MiniGridSFTDataset
-from collators import PaddedCollatorForActionPrediction, PaddedCollatorForLanguageModeling
+from .processors import get_image_processor
+from .dataset import MiniGridSFTDataset
+from .collators import PaddedCollatorForActionPrediction, PaddedCollatorForLanguageModeling
 
 logger = logging.getLogger(__name__)
 

@@ -4,28 +4,28 @@ model:
   dtype: "float32"
   lora:
     enabled: true
-    r: 8
-    alpha: 16
+    r: 16
+    alpha: 32
     dropout: 0.05
     target_modules: [q_proj, v_proj, k_proj, o_proj]
 
 image_processor:
-  max_img_size: 224
-  splitted_image_size: 112
+  max_img_size: 64
+  splitted_image_size: 32
   mp_image_token_length: 2
 
 dataset:
-  path: "nanovlm/data/minigrid_small/dataset.jsonl"
+  path: "nanovlm/data/minigrid/dataset.jsonl"
   val_split: 0.2
   max_length: 512
 
 training:
   method: "sft"         # sft | grpo
-  epochs: 3
-  batch_size: 4
+  epochs: 5
+  batch_size: 8
   lr: 1.0e-4
   weight_decay: 0.01
-  warmup_steps: 100
+  warmup_steps: 300
   max_grad_norm: 1.0
   seed: 42
   device: "auto"        # auto | cuda | mps | cpu

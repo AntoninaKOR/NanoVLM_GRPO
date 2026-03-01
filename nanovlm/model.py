@@ -8,7 +8,7 @@ from transformers import AutoProcessor, AutoTokenizer, AutoModelForCausalLM, Aut
 from PIL import Image
 import numpy as np
 
-from processors import get_image_processor, get_image_string
+from .processors import get_image_processor, get_image_string
 
 # MiniGrid action space
 ACTIONS = {
@@ -301,7 +301,7 @@ def prepare_training_data(
 
 if __name__ == "__main__":
     print("Testing NanoVLM action predictor...")
-    from processors import get_tokenizer
+    from .processors import get_tokenizer
     
     model_name = "qnguyen3/nanoLLaVA-1.5"
     

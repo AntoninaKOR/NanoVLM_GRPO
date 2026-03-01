@@ -31,6 +31,61 @@ def neighbors(env: gym.Env, pos: Tuple[int, int]) -> Iterable[Tuple[int, int]]:
             yield (nx, ny)
 
 
+# Direction index → human-readable name
+_DIR_NAMES = {0: "east", 1: "south", 2: "west", 3: "north"}
+
+# Direction vectors for each agent_dir
+_DIR_VECTORS = {0: (1, 0), 1: (0, 1), 2: (-1, 0), 3: (0, -1)}
+
+
+def _relative_direction(dx: int, dy: int) -> str:
+    """Return a cardinal/intercardinal direction string from deltas."""
+    if dx == 0 and dy == 0:
+        return "here"
+    parts = []
+    if dy < 0:
+        parts.append("north")
+    elif dy > 0:
+        parts.append("south")
+    if dx > 0:
+        parts.append("east")
+    elif dx < 0:
+        parts.append("west")
+    return "-".join(parts) if parts else "here"
+
+
+def generate_state_description(env: gym.Env) -> str:
+    """Build a 2-3 sentence spatial description of the current observation.
+
+    Example output:
+        "The agent is at position (3, 4) facing east. The goal is 5 steps
+        to the south-east. There is a wall directly ahead."
+    """
+    unwrapped = env.unwrapped
+    ax, ay = int(unwrapped.agent_pos[0]), int(unwrapped.agent_pos[1])
+    agent_dir = int(unwrapped.agent_dir)
+    gx, gy = get_goal_pos(env)
+
+    facing = _DIR_NAMES[agent_dir]
+    sentences = [f"The agent is at position ({ax}, {ay}) facing {facing}."]
+
+    dx, dy = gx - ax, gy - ay
+    dist = abs(dx) + abs(dy)
+    if dist == 0:
+        sentences.append("The agent is on the goal.")
+    else:
+        rel = _relative_direction(dx, dy)
+        sentences.append(f"The goal is {dist} steps to the {rel}.")
+
+    # Check cell directly ahead
+    vx, vy = _DIR_VECTORS[agent_dir]
+    ahead = (ax + vx, ay + vy)
+    if not is_walkable(env, ahead):
+        sentences.append("There is a wall directly ahead.")
+
+    return " ".join(sentences)
+
+
 def action_to_next(env: gym.Env, next_pos: Tuple[int, int]) -> Optional[int]:
     unwrapped = env.unwrapped
     agent_pos = tuple(unwrapped.agent_pos)

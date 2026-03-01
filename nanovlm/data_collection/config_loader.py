@@ -60,7 +60,6 @@ def config_to_args(config: Dict[str, Any]) -> Dict[str, Any]:
         "num_episodes": config["collection"]["num_episodes"],
         "max_steps": config["collection"]["max_steps_per_episode"],
         "output_dir": Path(config["output"]["dir"]),
-        "mode": config["collection"]["mode"],
     }
 
 

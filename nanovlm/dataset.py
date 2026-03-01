@@ -7,7 +7,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from processors import get_image_string
+from .processors import get_image_string
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +123,14 @@ class BaseMiniGridDataset(Dataset):
             [split_ratio],
             self.mp_image_token_length
         )
-        target = item["target"]
-        assert target, "Example missing 'target' key or value is empty"
+
+        action_name = item["target"]
+        assert action_name, "Example missing 'target' key or value is empty"
+        if self.mode == "text_action":
+            description = item.get("description", "The agent needs to navigate to the goal.")
+            target = f"{description} Action: {action_name}"
+        else:
+            target = action_name
         prompt = self._get_prompt()
         messages = [
             {"role": "user", "content": image_str + prompt},
