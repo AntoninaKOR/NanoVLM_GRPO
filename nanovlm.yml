@@ -1,0 +1,12 @@
+name: nanovlm
+channels:
+  - defaults
+dependencies:
+  - datasets=4.4.1
+  - hf-xet=1.2.0
+  - python=3.10.19
+  - regex=2025.11.3
+  - safetensors=0.6.2
+  - pip:
+      - -r requirements.txt
+prefix: /Users/a/miniconda3/envs/nanovlm
