@@ -377,6 +377,8 @@ def main():
                         help="Episodes for MiniGrid env evaluation per epoch (0 to skip)")
     parser.add_argument("--eval-max-steps", type=int, default=None,
                         help="Max steps per episode during env evaluation")
+    parser.add_argument("--prompt-type", choices=["simple", "with_description"], default=None,
+                        help="Prompt format: 'simple' (baseline) or 'with_description' (includes state description)")
     args = parser.parse_args()
 
     # Load config with CLI overrides
@@ -385,6 +387,8 @@ def main():
     img_cfg = cfg["image_processor"]
     data_cfg = cfg["dataset"]
     train_cfg = cfg["training"]
+    prompt_cfg = cfg.get("prompts", {})
+    prompt_type = prompt_cfg.get("prompt_type", "simple")
 
     # Apply CLI overrides
     if args.mode is not None:
@@ -403,6 +407,8 @@ def main():
         data_cfg["path"] = args.dataset
     if args.seed is not None:
         train_cfg["seed"] = args.seed
+    if args.prompt_type is not None:
+        prompt_type = args.prompt_type
     env_cfg = cfg["env"]
     eval_cfg = cfg.get("eval", {})
     eval_episodes = args.eval_episodes if args.eval_episodes is not None else eval_cfg.get("num_episodes", 5)
@@ -459,6 +465,7 @@ def main():
         mp_image_token_length=img_cfg["mp_image_token_length"],
         mode=model_cfg["mode"],
         max_length=data_cfg["max_length"],
+        prompt_type=prompt_type,
         collator_type="action_prediction",
     )
 

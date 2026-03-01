@@ -52,6 +52,7 @@ class BaseMiniGridDataset(Dataset):
         mp_image_token_length: int,
         mode: str = "action",
         max_length: int = 512,
+        prompt_type: str = "simple",
     ):
         """Initialize dataset.
         
@@ -62,10 +63,12 @@ class BaseMiniGridDataset(Dataset):
             mp_image_token_length: Number of image tokens per patch
             mode: Training mode ('action' or 'text_action')
             max_length: Maximum sequence length
+            prompt_type: Prompt format ('simple' or 'with_description')
         """
         assert mode in ["action", "text_action"], f"Mode must be 'action' or 'text_action', got {mode}" 
         assert mp_image_token_length > 0, "mp_image_token_length must be positive"
         assert max_length > 0, "max_length must be positive"
+        assert prompt_type in ["simple", "with_description"], f"prompt_type must be 'simple' or 'with_description', got {prompt_type}"
         self.jsonl_path = Path(jsonl_path)
         if not self.jsonl_path.exists():
             raise FileNotFoundError(f"Dataset file not found: {self.jsonl_path}")
@@ -75,6 +78,7 @@ class BaseMiniGridDataset(Dataset):
         self.mp_image_token_length = mp_image_token_length
         self.mode = mode
         self.max_length = max_length
+        self.prompt_type = prompt_type
         
         # Calculate prefix length for proper label masking
         self.prefix_len = _get_chat_template_prefix_len(tokenizer)
@@ -82,17 +86,37 @@ class BaseMiniGridDataset(Dataset):
         with open(self.jsonl_path, 'r') as fh:
             self.examples = [json.loads(line) for line in fh]
         logger.info(f"Loaded {len(self.examples)} examples from {self.jsonl_path}")
+        logger.info(f"Prompt type: {prompt_type}")
 
     def __len__(self) -> int:
         return len(self.examples)
 
-    def _get_prompt(self) -> str:
-        if self.mode == "action":
-            return "What action should the agent take to reach the goal? Reply with exactly one of: turn_left, turn_right, forward."
-        elif self.mode == "text_action":
-            return "Describe what you observe and what action the agent should take. End your reply with the action name."
+    def _get_prompt(self, item: Dict) -> str:
+        """Build prompt based on prompt_type and mode.
+        
+        Args:
+            item: Example dict with 'description' key (if available)
+            
+        Returns:
+            Prompt text
+        """
+        if self.prompt_type == "simple":
+            if self.mode == "action":
+                return "What action should the agent take to reach the goal? Reply with exactly one of: turn_left, turn_right, forward."
+            elif self.mode == "text_action":
+                return "Describe what you observe and what action the agent should take. End your reply with the action name."
+        
+        elif self.prompt_type == "with_description":
+            description = item.get("description", "")
+            description_text = f"{description}\n" if description else ""
+            
+            if self.mode == "action":
+                return f"{description_text}What action should the agent take? Reply with exactly one of: turn_left, turn_right, forward."
+            elif self.mode == "text_action":
+                return f"{description_text}Describe your reasoning and what action the agent should take. End your reply with the action name."
+        
         else:
-            raise ValueError(f"Unsupported mode: {self.mode}")
+            raise ValueError(f"Unsupported prompt_type: {self.prompt_type}")
     
     def _process_item(self, item: Dict) -> Dict[str, torch.Tensor]:
         """Process a single example into model inputs.
@@ -131,7 +155,7 @@ class BaseMiniGridDataset(Dataset):
             target = f"{description} Action: {action_name}"
         else:
             target = action_name
-        prompt = self._get_prompt()
+        prompt = self._get_prompt(item)
         messages = [
             {"role": "user", "content": image_str + prompt},
             {"role": "assistant", "content": target}

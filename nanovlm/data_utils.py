@@ -19,6 +19,7 @@ def get_dataset_and_collator(
     mp_image_token_length: int = 256,
     mode: str = "action",
     max_length: int = 512,
+    prompt_type: str = "simple",
     collator_type: str = "action_prediction",
     collator_kwargs: Optional[Dict] = None,
 ) -> Tuple[Dataset, Union[PaddedCollatorForActionPrediction, PaddedCollatorForLanguageModeling]]:
@@ -33,6 +34,7 @@ def get_dataset_and_collator(
         mp_image_token_length: Number of image tokens per patch
         mode: Training mode ('action' or 'text_action')
         max_length: Maximum sequence length
+        prompt_type: Prompt format ('simple' or 'with_description')
         collator_type: 'action_prediction' or 'language_modeling'
         collator_kwargs: Additional kwargs for collator (e.g., model_max_length, pad_token_id)
         
@@ -58,6 +60,7 @@ def get_dataset_and_collator(
         mp_image_token_length=mp_image_token_length,
         mode=mode,
         max_length=max_length,
+        prompt_type=prompt_type,
     )
  
     logger.info(f"Creating {collator_type} collator")

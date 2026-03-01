@@ -9,6 +9,9 @@ model:
     dropout: 0.05
     target_modules: [q_proj, v_proj, k_proj, o_proj]
 
+prompts:
+  prompt_type: "simple"  # simple | with_description
+
 image_processor:
   max_img_size: 64
   splitted_image_size: 32
