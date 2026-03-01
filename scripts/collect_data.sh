@@ -12,5 +12,5 @@ python -m nanovlm.data_collection.collect_data \
         MiniGrid-Empty-16x16-v0 \
         MiniGrid-Empty-Random-5x5-v0 \
         MiniGrid-Empty-Random-6x6-v0 \
-    --episodes 100 \
+    --episodes 50 \
     --out-dir nanovlm/data/minigrid

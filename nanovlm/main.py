@@ -138,6 +138,7 @@ def evaluate_in_env(
     model: NanoVLMActionPredictor,
     num_episodes: int = 50,
     seed: int = 42,
+    max_steps: int = 20,
 ) -> Dict:
     """Evaluate model in MiniGrid environment.
     
@@ -145,11 +146,12 @@ def evaluate_in_env(
         model: Model to evaluate
         num_episodes: Number of episodes to run
         seed: Random seed
+        max_steps: Maximum steps per episode
         
     Returns:
         Dict with success_rate, avg_return, avg_length, etc.
     """
-    env = MiniGridRLEnv(env_id="MiniGrid-Empty-8x8-v0", seed=seed)
+    env = MiniGridRLEnv(env_id="MiniGrid-Empty-8x8-v0", seed=seed, max_steps=max_steps)
     evaluator = ModelEvaluator(model, env, model.model.device if hasattr(model.model, 'device') else torch.device('cpu'))
     
     stats, episodes = evaluator.evaluate(
@@ -487,7 +489,7 @@ def _train_sft(args, device, tokenizer, special_tokens, output_dir):
         env_stats = None
         if epoch % 2 == 0:
             logger.info("Evaluating in environment...")
-            env_stats = evaluate_in_env(model, num_episodes=20,  seed=args.seed + epoch)
+            env_stats = evaluate_in_env(model, num_episodes=20, seed=args.seed + epoch, max_steps=20)
             logger.info(f"  Env Success Rate: {env_stats['success_rate']:.2%}, Avg Return: {env_stats['avg_return']:.3f}")
         
         # Log
@@ -663,7 +665,7 @@ def _train_grpo(args, device, tokenizer, special_tokens, output_dir):
         if update_idx % 5 == 0:
             # Environment evaluation
             logger.info("  Evaluating policy in environment...")
-            env_stats = evaluate_in_env(policy_model, num_episodes=20, seed=args.seed + update_idx)
+            env_stats = evaluate_in_env(policy_model, num_episodes=20, seed=args.seed + update_idx, max_steps=20)
             logger.info(
                 f"  Env Success: {env_stats['success_rate']:.2%}, "
                 f"Avg Return: {env_stats['avg_return']:.3f}, "
