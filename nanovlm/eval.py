@@ -313,32 +313,4 @@ class ComparisonPlotter:
         plt.close()
 
 
-def load_checkpoint(checkpoint_path: str, device: torch.device, tokenizer) -> NanoVLMActionPredictor:
-    """Load a trained model checkpoint (SFT or GRPO).
-    
-    Args:
-        checkpoint_path: Path to checkpoint
-        device: Device to load on
-        tokenizer: Tokenizer
-        
-    Returns:
-        Loaded model
-    """
-    from .grpo_train_action import load_sft_checkpoint
-    
-    checkpoint_path = Path(checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    
-    logger.info(f"Loading model from {checkpoint_path}")
-    
-    # Try to load as SFT/GRPO checkpoint
-    try:
-        model = load_sft_checkpoint(str(checkpoint_path), device, tokenizer)
-        return model
-    except Exception as e:
-        logger.warning(f"Failed to load checkpoint: {e}")
-        raise
-
-
 

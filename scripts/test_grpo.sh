@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Check if checkpoint exists, otherwise train SFT first
-if [ ! -f "nanovlm/checkpoints/test_training/best_model/config.json" ]; then
+if [ ! -f "nanovlm/checkpoints/test_training/best_model/tokenizer.json" ]; then
     echo "SFT checkpoint not found. Training SFT baseline first..."
     python -m nanovlm.main \
         --dataset nanovlm/data/minigrid_small/dataset.jsonl \
@@ -24,8 +24,8 @@ python -m nanovlm.main \
     --batch-size 1 \
     --lr 1e-4 \
     --num-episodes 4 \
-    --num-updates 2 \
-    --num-trajectory-batch 2 \
+    --num-updates 4 \
+    --num-trajectory-batch 3 \
     --kl-beta 0.1 \
     --entropy-weight 0.01 \
     --output-dir nanovlm/checkpoints/test_grpo

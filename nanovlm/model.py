@@ -3,12 +3,14 @@ from peft import LoraConfig, get_peft_model
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoProcessor, AutoTokenizer, AutoModelForCausalLM, AutoImageProcessor, AutoConfig, PreTrainedTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, PreTrainedTokenizer
 from PIL import Image
 import numpy as np
 
 from .processors import get_image_processor, get_image_string
+from .vision_transformer import ViT, ModalityProjector
 
 # MiniGrid action space
 ACTIONS = {
@@ -31,6 +33,10 @@ class NanoVLMActionPredictor(nn.Module):
     Training modes:
     - mode='action': Directly predict action from image
     - mode='text_action': Generate text description then action
+    
+    Vision support:
+    - Optional pretrained ViT encoder (e.g., google/siglip2-base-patch16-512)
+    - Requires modality_projector to project vision features to language space
     """
     
     def __init__(
@@ -45,6 +51,7 @@ class NanoVLMActionPredictor(nn.Module):
         splitted_image_size: int = 8,
         mp_image_token_length: int = 2,
         dtype: str = "float32",
+        vit_model_type: str = "google/siglip2-base-patch16-512",
     ):
         super().__init__()
         if tokenizer is None:
@@ -56,6 +63,7 @@ class NanoVLMActionPredictor(nn.Module):
         self.max_img_size = max_img_size
         self.splitted_image_size = splitted_image_size
         self.mp_image_token_length = mp_image_token_length
+        self.vit_model_type = vit_model_type
         
         config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         config.pad_token_id = self.tokenizer.pad_token_id
@@ -79,6 +87,21 @@ class NanoVLMActionPredictor(nn.Module):
             max_img_size=max_img_size,
             splitted_image_size=splitted_image_size
         )
+        
+        # Vision encoder: load pretrained SigLIP ViT with proper weight mapping
+        self.vision_encoder = ViT.from_pretrained(vit_model_type)
+        self.vision_encoder.requires_grad_(False)  # Freeze vision encoder by default
+
+        # Modality projector: vision_hidden_dim -> language_hidden_dim
+        vision_hidden_size = self.vision_encoder.cfg.hidden_dim
+        language_hidden_size = self.model.config.hidden_size
+        self.modality_projector = ModalityProjector(
+            vision_hidden_size=vision_hidden_size,
+            language_hidden_size=language_hidden_size,
+            pixel_shuffle_factor=4,
+        )
+        print(f"Vision encoder: {vit_model_type} (frozen, {vision_hidden_size}d)")
+        print(f"Modality projector: {vision_hidden_size} -> {language_hidden_size}")
         
         # Store action token IDs for later extraction
         self.action_token_ids = {
@@ -135,19 +158,11 @@ class NanoVLMActionPredictor(nn.Module):
             return_tensors="pt",
             padding=True
         )
-    
-        all_patches = []
-        for img in images:
-            patches, grid_info = self.image_processor(img)
-            all_patches.append(patches)
-
-        pixel_values = torch.cat(all_patches, dim=0)
         
-        inputs = {**text_inputs, "pixel_values": pixel_values}
-        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-        
+        # Move text inputs to device
+        text_inputs = {k: v.to(self.model.device) for k, v in text_inputs.items()}
         outputs = self.model(
-            **inputs,
+            **text_inputs,
             labels=labels,
             return_dict=True
         )
@@ -156,6 +171,70 @@ class NanoVLMActionPredictor(nn.Module):
             "logits": outputs.logits,
             "loss": outputs.loss if labels is not None else None
         }
+    
+    def _process_images(self, images, device: torch.device) -> Optional[torch.Tensor]:
+        """Normalize image input to a single tensor on device."""
+        if images is None:
+            return None
+        if isinstance(images, list):
+            if images and isinstance(images[0], list):
+                images = [img for sublist in images for img in sublist]
+            if not images:
+                return None
+            return torch.cat(images, dim=0).to(device)
+        return images.to(device)
+
+    def _replace_image_tokens(self, input_ids: torch.Tensor, token_embd: torch.Tensor, image_embd: torch.Tensor) -> torch.Tensor:
+        """Replace <image> token placeholders with actual image embeddings."""
+        updated = token_embd.clone()
+        image_token_id = self.tokenizer.convert_tokens_to_ids("<image>")
+        mask = (input_ids == image_token_id)
+        assert mask.any(), "No <image> tokens found in input_ids — cannot inject vision embeddings"
+        updated[mask] = image_embd.view(-1, image_embd.size(-1)).to(updated.dtype)
+        return updated
+
+    def forward_with_vision(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Multimodal forward pass following example_nanovlm VisionLanguageModel pattern.
+
+        Pipeline:
+            1. Encode images: ViT(images) -> [B, num_patches, D_vit]
+            2. Project: ModalityProjector(image_features) -> [N_images, mp_token_len, D_lm]
+            3. Get text embeddings and replace <image> tokens with projected image embeddings
+            4. Forward combined embeddings through language model
+        """
+        images_tensor = self._process_images(images, input_ids.device)
+        token_embd = self.model.get_input_embeddings()(input_ids)  # [B, T, D_lm]
+
+        if images_tensor is not None:
+            assert self.vision_encoder is not None, "vision_encoder is required when images are provided"
+            assert self.modality_projector is not None, "modality_projector is required when images are provided"
+
+            image_features = self.vision_encoder(images_tensor)     # [N_images, num_patches, D_vit]
+            image_embd = self.modality_projector(image_features)    # [N_images, mp_token_len, D_lm]
+            token_embd = self._replace_image_tokens(input_ids, token_embd, image_embd)
+
+        outputs = self.model(
+            inputs_embeds=token_embd,
+            attention_mask=attention_mask,
+            labels=labels,
+            return_dict=True,
+        )
+
+        loss = None
+        if labels is not None:
+            loss = F.cross_entropy(
+                outputs.logits.view(-1, outputs.logits.size(-1)),
+                labels.view(-1),
+                ignore_index=-100,
+            )
+
+        return {"logits": outputs.logits, "loss": loss}
     
     def predict_action(
         self,

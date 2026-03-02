@@ -12,7 +12,7 @@ from .processors import get_tokenizer
 from .device_utils import get_device, setup_device, print_device_stats
 from .env import MiniGridRLEnv, Episode
 from .grpo_algorithm import GRPOConfig
-from .grpo_train_action import DirectActionGRPOTrainer, load_sft_checkpoint
+from .grpo_train_action import DirectActionGRPOTrainer
 
 logger = logging.getLogger(__name__)
 

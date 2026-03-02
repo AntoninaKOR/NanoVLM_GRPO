@@ -98,6 +98,20 @@ class ConfigLoader:
         
         return value
     
+    def __getitem__(self, key: str) -> Any:
+        """Allow subscript access to configuration (e.g., cfg["model"])."""
+        if key not in self.config:
+            raise KeyError(f"Configuration key not found: {key}")
+        return self.config[key]
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert config to plain dictionary for serialization."""
+        return self.config.copy()
+    
+    def __iter__(self):
+        """Allow iteration over config keys."""
+        return iter(self.config)
+    
     def get_section(self, section: str) -> ConfigNamespace:
         """
         Get entire configuration section as namespace object.

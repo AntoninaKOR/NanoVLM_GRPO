@@ -101,6 +101,9 @@ class MiniGridRLEnv:
         next_obs, reward, terminated, truncated, info = self.env.step(action)
         next_obs = next_obs["image"]
         
+        # Small step penalty to create return variance even when episodes all fail
+        reward -= 0.01
+        
         self.step_count += 1
         self.obs = next_obs
         

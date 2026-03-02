@@ -8,12 +8,14 @@ TOKENIZERS_CACHE = {}
 def get_tokenizer(name, extra_special_tokens=None, chat_template=None, **kwargs):
     if name not in TOKENIZERS_CACHE:
         tokenizer_init_kwargs = {"use_fast": True}
+        
         if extra_special_tokens is not None:
-            tokenizer_init_kwargs["extra_special_tokens"] = extra_special_tokens
+            tokenizer_init_kwargs["additional_special_tokens"] = list(extra_special_tokens.values())
+        
         if chat_template is not None:
             tokenizer_init_kwargs["chat_template"] = chat_template
-        tokenizer_init_kwargs.update(kwargs)
-        tokenizer = AutoTokenizer.from_pretrained(name, **tokenizer_init_kwargs,)
+        tokenizer_init_kwargs.update(kwargs)   
+        tokenizer = AutoTokenizer.from_pretrained(name, **tokenizer_init_kwargs)
         tokenizer.pad_token = tokenizer.eos_token
         
         # Add special tokens as attributes for easy access via getattr()

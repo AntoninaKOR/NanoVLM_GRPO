@@ -2,6 +2,7 @@ model:
   name: "HuggingFaceTB/SmolLM2-360M-Instruct"
   mode: "action"        # action | text_action
   dtype: "float32"
+  vit_model_type: "google/siglip2-base-patch16-512"
   lora:
     enabled: true
     r: 16

@@ -139,14 +139,16 @@ class GRPOTrainer:
         Returns:
             KL divergence [batch_size]
         """
-        current_probs = torch.softmax(current_logits, dim=-1)
+        # kl_div expects log probabilities as input and probabilities as target
+        current_log_probs = torch.log_softmax(current_logits, dim=-1)
         reference_probs = torch.softmax(reference_logits, dim=-1)
         
-        # Add small epsilon to avoid log(0)
-        eps = 1e-8
-        current_log_probs = torch.log(current_probs + eps)
-        
-        kl = torch.sum(reference_probs * (torch.log(reference_probs + eps) - current_log_probs), dim=-1)
+        kl_per_action = torch.nn.functional.kl_div(
+            current_log_probs, 
+            reference_probs, 
+            reduction='none'
+        )
+        kl = kl_per_action.sum(dim=-1)  # Sum over action dimension
         return kl
     
     def compute_likelihood(
@@ -163,9 +165,9 @@ class GRPOTrainer:
         Returns:
             Log likelihood [batch_size]
         """
-        log_probs = torch.log_softmax(logits, dim=-1)
-        selected_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
-        return selected_log_probs
+        dist = Categorical(logits=logits)
+        log_probs = dist.log_prob(actions)  # [batch_size]
+        return log_probs
     
     def compute_advantages(
         self,
@@ -229,8 +231,9 @@ class GRPOTrainer:
         kl_div = self.compute_kl_divergence(current_logits, reference_logits)
         
         # GRPO objective: maximize advantage * log_prob - β * KL
-        # We minimize the negative
-        policy_loss = -torch.mean(torch.clamp(advantages, min=0.0) * log_probs)
+        # We minimize the negative. Full advantages (positive & negative) are used
+        # so that negative advantages push the policy away from bad actions.
+        policy_loss = -torch.mean(advantages * log_probs)
         kl_loss = self.config.kl_coeff * torch.mean(kl_div)
         
         # Add entropy regularization

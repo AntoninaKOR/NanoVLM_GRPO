@@ -118,7 +118,77 @@ class BaseMiniGridDataset(Dataset):
         else:
             raise ValueError(f"Unsupported prompt_type: {self.prompt_type}")
     
-    def _process_item(self, item: Dict) -> Dict[str, torch.Tensor]:
+    def _prepare_inputs_and_loss_mask(self, messages: List[Dict]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prepare input IDs with proper loss mask.
+        
+        This approach:
+        1. Applies chat template to full conversation
+        2. Tokenizes the assistant response separately to find its tokens
+        3. Searches for those tokens in the full sequence to find the response positions
+        4. Marks only the response tokens as trainable
+        5. Rolls labels for causal LM training
+        
+        Args:
+            messages: List of dicts with 'role' and 'content' keys
+            
+        Returns:
+            Tuple of (input_ids, labels, attention_mask) tensors
+        """
+        # Get full conversation tokens
+        conv_ids = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_special_tokens=False,
+            return_dict=True,
+        )
+        input_ids = conv_ids["input_ids"]
+        
+        # Find assistant messages and extract their token representations
+        labels = [IGNORE_INDEX] * len(input_ids)
+        
+        # Find all assistant messages and tokenize them
+        for msg in messages:
+            if msg["role"] == "assistant":
+                # Tokenize just the assistant's content
+                response_tokens = self.tokenizer.encode(
+                    msg["content"],
+                    add_special_tokens=False
+                )
+                
+                logger.debug(f"Assistant response: {msg['content'][:50]}")
+                logger.debug(f"Response tokens: {response_tokens}")
+                
+                if not response_tokens:
+                    continue
+                
+                # Search for this sequence in the full input_ids
+                # We search from the end since assistant messages come toward the end
+                for i in range(len(input_ids) - len(response_tokens), -1, -1):
+                    # Compare as lists directly
+                    if list(input_ids[i:i+len(response_tokens)]) == response_tokens:
+                        logger.debug(f"Found assistant response at position {i}-{i+len(response_tokens)}")
+                        # Found it! Mark these tokens as trainable
+                        for j in range(i, i + len(response_tokens)):
+                            labels[j] = input_ids[j]
+                        break
+                else:
+                    logger.warning(f"Could not find assistant tokens {response_tokens} in input_ids")
+        
+        # Check if we found any assistant tokens
+        num_trainable = sum(1 for l in labels if l != IGNORE_INDEX)
+        logger.debug(f"Trainable tokens: {num_trainable} / {len(labels)}")
+        
+        # Roll labels for causal LM (predict next token)
+        labels_rolled = [labels[-1]] + labels[:-1]
+        labels_rolled[0] = IGNORE_INDEX  # First token has no predecessor
+        
+        return (
+            torch.tensor(input_ids, dtype=torch.long),
+            torch.tensor(labels_rolled, dtype=torch.long),
+            torch.tensor(conv_ids["attention_mask"], dtype=torch.long)
+        )
+
+    def _process_item(self, item: Dict) -> Optional[Dict[str, torch.Tensor]]:
         """Process a single example into model inputs.
         
         Returns dictionary with:
@@ -126,69 +196,62 @@ class BaseMiniGridDataset(Dataset):
         - attention_mask: Attention mask (1 for real tokens, 0 for padding)
         - labels: Labels for loss computation (IGNORE_INDEX for user prompts, token IDs for responses)
         - images: List of processed image patches
+        
+        Returns None if example is invalid (missing required fields).
         """
-    
-        image_path = item["image"]
+  
+        image_path = item.get("image")
         if not image_path:
             logger.warning("Example missing 'image' key")
             return None
         
+        # Load and process image
         image = Image.open(image_path).convert("RGB")
         processed_patches, split_ratio = self.image_processor(image)
         
         # Remove global patch if tokenizer doesn't support it but processor generated it
-        # if not hasattr(self.tokenizer, "global_image_token"):
-        #     n_patches = split_ratio[0] * split_ratio[1]
-        #     if n_patches > 0 and len(processed_patches) == n_patches + 1:
-        #         processed_patches = processed_patches[1:]
+        if not hasattr(self.tokenizer, "global_image_token") and split_ratio[0] * split_ratio[1] == len(processed_patches) - 1:
+            processed_patches = processed_patches[1:]
         
+        # Build image string
         image_str = get_image_string(
             self.tokenizer,
             [split_ratio],
             self.mp_image_token_length
         )
-
-        action_name = item["target"]
-        assert action_name, "Example missing 'target' key or value is empty"
+        
+        action_name = item.get("target")
+        if not action_name:
+            logger.warning("Example missing 'target' key or value is empty")
+            return None
+        
+        # Build messages based on mode
+        prompt = self._get_prompt(item)
+        
         if self.mode == "text_action":
             description = item.get("description", "The agent needs to navigate to the goal.")
-            target = f"{description} Action: {action_name}"
+            assistant_content = f"{description} Action: {action_name}"
         else:
-            target = action_name
-        prompt = self._get_prompt(item)
+            assistant_content = action_name
+        
         messages = [
             {"role": "user", "content": image_str + prompt},
-            {"role": "assistant", "content": target}
+            {"role": "assistant", "content": assistant_content}
         ]
         
-        tokenized = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=False,
-            add_special_tokens=False,
-            return_dict=True
-        )
+        # Prepare inputs and labels with proper masking
+        input_ids, labels, attention_mask = self._prepare_inputs_and_loss_mask(messages)
         
-        input_ids = tokenized["input_ids"]
-
-        prompt_only = self.tokenizer.apply_chat_template(
-            [messages[0]],
-            tokenize=True,
-            add_generation_prompt=True,
-            add_special_tokens=False
-        )
-        
-        input_ids = input_ids[:self.max_length]
-        
-        # mask everything except assistant response
-        labels = input_ids.copy()
-        prompt_len = min(len(prompt_only), len(input_ids))
-        labels[:prompt_len] = [IGNORE_INDEX] * prompt_len 
+        # Truncate if necessary - keep last tokens for causal LM (we want to keep the assistant response at the end)
+        if len(input_ids) > self.max_length:
+            input_ids = input_ids[-self.max_length:]
+            labels = labels[-self.max_length:]
+            attention_mask = attention_mask[-self.max_length:]
         
         return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
-            "attention_mask": torch.ones(len(input_ids), dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
             "images": [processed_patches],
         }
         

@@ -38,8 +38,14 @@ class DirectActionGRPOTrainer:
         self.tokenizer = tokenizer
         
         # Optimizer for policy
+        # Filter to only trainable parameters (LoRA adapters)
+        trainable_params = [param for param in self.model.model.parameters() if param.requires_grad]
+        total_params = sum(p.numel() for p in self.model.model.parameters())
+        trainable_param_count = sum(p.numel() for p in trainable_params)
+        logger.info(f"Optimizer - Total params: {total_params:,} | Trainable: {trainable_param_count:,} ({100*trainable_param_count/total_params:.2f}%)")
+        
         self.optimizer = torch.optim.AdamW(
-            self.model.model.parameters(),
+            trainable_params,
             lr=grpo_config.learning_rate,
             weight_decay=0.01,
         )
@@ -175,10 +181,11 @@ class DirectActionGRPOTrainer:
         prompt = "What action should the agent take to reach the goal?"
         prompts = [prompt] * len(images)
         
+        # Current model needs gradients for loss.backward()
+        current_output = self.model(images=images, prompts=prompts)
+        current_logits = current_output["logits"]
+        
         with torch.no_grad():
-            current_output = self.model(images=images, prompts=prompts)
-            current_logits = current_output["logits"]
-            
             reference_output = self.reference_model(images=images, prompts=prompts)
             reference_logits = reference_output["logits"]
         
@@ -212,29 +219,3 @@ class DirectActionGRPOTrainer:
             torch.save(self.model.model.state_dict(), str(model_path))
         
         logger.info(f"Saved checkpoint to {model_path}")
-
-
-def load_sft_checkpoint(checkpoint_path: str, device: torch.device, tokenizer) -> NanoVLMActionPredictor:
-    """Load SFT baseline model.
-    
-    Args:
-        checkpoint_path: Path to checkpoint directory
-        device: Device to load on
-        tokenizer: Tokenizer
-        
-    Returns:
-        Loaded model
-    """
-    logger.info(f"Loading SFT checkpoint from {checkpoint_path}")
-    
-    model = NanoVLMActionPredictor(
-        tokenizer=tokenizer,
-        mode="action",
-        use_lora=True,
-    )
-    
-    checkpoint_path = Path(checkpoint_path)
-    model.model.to(device)
-    logger.info(f"Model loaded from {checkpoint_path}")
-    
-    return model

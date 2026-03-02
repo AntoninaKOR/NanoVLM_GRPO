@@ -42,6 +42,18 @@ class PaddedCollatorForActionPrediction:
             - images: List of image patch stacks or None
         """
         
+        # Filter out None instances (invalid samples)
+        instances = [inst for inst in instances if inst is not None]
+        
+        if not instances:
+            # Return empty batch if all instances were filtered
+            return {
+                "input_ids": torch.zeros((0, self.model_max_length), dtype=torch.long),
+                "labels": torch.full((0, self.model_max_length), IGNORE_INDEX, dtype=torch.long),
+                "attention_mask": torch.zeros((0, self.model_max_length), dtype=torch.long),
+                "images": None,
+            }
+        
         input_ids = [inst["input_ids"] for inst in instances]
         labels = [inst["labels"] for inst in instances]
         attention_masks = [inst.get("attention_mask", torch.ones_like(iid)) for iid, inst in zip(input_ids, instances)]
@@ -67,10 +79,24 @@ class PaddedCollatorForActionPrediction:
         else:
             raise NotImplementedError("Left padding not yet implemented")
         
-        # Truncate if necessary
-        input_ids = input_ids[:, :self.model_max_length]
-        labels = labels[:, :self.model_max_length]
-        attention_masks = attention_masks[:, :self.model_max_length]
+        # Truncate if necessary - use right alignment to keep sequence ends (for causal LM, we want to keep the targets)
+        # Instead of taking first model_max_length tokens, take last model_max_length tokens
+        if input_ids.shape[1] > self.model_max_length:
+            import logging
+            logger_collator = logging.getLogger(__name__)
+            logger_collator.debug(f"Truncating from {input_ids.shape[1]} to {self.model_max_length} tokens (right-aligned)")
+            logger_collator.debug(f"Labels before truncate: min={labels.min()}, max={labels.max()}, num_labels_not_ignore={torch.sum(labels != IGNORE_INDEX)}")
+            input_ids = input_ids[:, -self.model_max_length:]
+            labels = labels[:, -self.model_max_length:]
+            attention_masks = attention_masks[:, -self.model_max_length:]
+            logger_collator.debug(f"Labels after truncate: min={labels.min()}, max={labels.max()}, num_labels_not_ignore={torch.sum(labels != IGNORE_INDEX)}")
+            # Also re-compute attention mask to ensure it's correct length
+            attention_masks = input_ids.ne(self.pad_token_id)
+        else:
+            import logging
+            logger_collator = logging.getLogger(__name__)
+            logger_collator.debug(f"No truncation needed: {input_ids.shape[1]} <= {self.model_max_length}")
+            logger_collator.debug(f"Labels: min={labels.min()}, max={labels.max()}, num_labels_not_ignore={torch.sum(labels != IGNORE_INDEX)}")
         
         # Stack images if present
         images = None
