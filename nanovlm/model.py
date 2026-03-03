@@ -263,7 +263,7 @@ class NanoVLMActionPredictor(nn.Module):
         self,
         image: Union[Image.Image, np.ndarray],
         return_text: bool = False,
-        max_new_tokens: int = 50,
+        max_new_tokens: Optional[int] = None,
     ) -> Union[int, Tuple[int, str]]:
         """
         Predict action from a single observation.
@@ -271,12 +271,18 @@ class NanoVLMActionPredictor(nn.Module):
         Args:
             image: Single observation image
             return_text: If True, also return generated text
-            max_new_tokens: Max tokens to generate
+            max_new_tokens: Max tokens to generate. If None, set based on mode:
+                - 'action' mode: 1 token (only action)
+                - 'text_action' mode: 50 tokens (description + action)
         
         Returns:
             action_id: Integer action ID (0-6)
             text (optional): Generated text if return_text=True
         """
+        # Set max_new_tokens based on mode if not provided
+        if max_new_tokens is None:
+            max_new_tokens = 1 if self.mode == "action" else 50
+        
         # Convert numpy array to PIL Image if needed
         if isinstance(image, np.ndarray):
             image = Image.fromarray(image)
@@ -343,11 +349,14 @@ class NanoVLMActionPredictor(nn.Module):
                 next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
                 generated_ids = torch.cat([generated_ids, next_token], dim=-1)
                 attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
+                if next_token.item() == self.tokenizer.eos_token_id:
+                    break
         
-        # Decode generated text
-        # TODO: implement for batch > 1
+        # Decode only the newly generated tokens (exclude prompt + image tokens)
+        prompt_len = input_ids.shape[1]
+        generated_only = generated_ids[0][prompt_len:]
         generated_text = self.tokenizer.decode(
-            generated_ids[0],
+            generated_only,
             skip_special_tokens=False
         )
         
@@ -433,7 +442,7 @@ if __name__ == "__main__":
     print("Testing NanoVLM action predictor...")
     from .processors import get_tokenizer
     
-    model_name = "qnguyen3/nanoLLaVA-1.5"
+    model_name = "HuggingFaceTB/SmolLM2-360M-Instruct"
     
     # Initialize tokenizer with action special tokens
     special_tokens = {
