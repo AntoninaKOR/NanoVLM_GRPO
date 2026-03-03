@@ -178,13 +178,10 @@ class BaseMiniGridDataset(Dataset):
         num_trainable = sum(1 for l in labels if l != IGNORE_INDEX)
         logger.debug(f"Trainable tokens: {num_trainable} / {len(labels)}")
         
-        # Roll labels for causal LM (predict next token)
-        labels_rolled = [labels[-1]] + labels[:-1]
-        labels_rolled[0] = IGNORE_INDEX  # First token has no predecessor
-        
+
         return (
             torch.tensor(input_ids, dtype=torch.long),
-            torch.tensor(labels_rolled, dtype=torch.long),
+            torch.tensor(labels, dtype=torch.long),
             torch.tensor(conv_ids["attention_mask"], dtype=torch.long)
         )
 
@@ -225,14 +222,16 @@ class BaseMiniGridDataset(Dataset):
             logger.warning("Example missing 'target' key or value is empty")
             return None
         
+        action_token = f"<{action_name}>"
+        
         # Build messages based on mode
         prompt = self._get_prompt(item)
         
         if self.mode == "text_action":
             description = item.get("description", "The agent needs to navigate to the goal.")
-            assistant_content = f"{description} Action: {action_name}"
+            assistant_content = f"{description} Action: {action_token}"
         else:
-            assistant_content = action_name
+            assistant_content = action_token
         
         messages = [
             {"role": "user", "content": image_str + prompt},

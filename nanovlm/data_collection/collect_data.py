@@ -128,6 +128,8 @@ def collect_data(
             path: List[Tuple[int, int]] = []
             path_idx = 0
             steps = 0
+            episode_data: List[Dict[str, Any]] = []
+            rewards: List[float] = []
 
             while True:
                 if not path or path_idx >= len(path) - 1:
@@ -148,7 +150,7 @@ def collect_data(
                 action_name = action_names[int(action)]
                 description = generate_state_description(base_env)
 
-                examples.append(
+                episode_data.append(
                     {
                         "image": str(image_path),
                         "prompt": prompt,
@@ -161,13 +163,21 @@ def collect_data(
                     }
                 )
 
-                obs, _, terminated, truncated, _ = env.step(action)
+                obs, reward, terminated, truncated, _ = env.step(action)
+                rewards.append(float(reward))
                 steps += 1
                 path_idx = min(path_idx + 1, len(path) - 1)
                 if max_steps is not None and steps >= max_steps:
                     break
                 if terminated or truncated:
                     break
+
+            # Calculate return-to-go (cumulative reward from current step onward)
+            for i, data in enumerate(episode_data):
+                return_to_go = sum(rewards[i:])
+                data["reward"] = rewards[i]
+                data["return_to_go"] = return_to_go
+                examples.append(data)
 
         env.close()
 

@@ -14,9 +14,15 @@ prompts:
   prompt_type: "simple"  # simple | with_description
 
 image_processor:
-  max_img_size: 64
-  splitted_image_size: 32
-  mp_image_token_length: 2
+  max_img_size: 16      # 1 patch
+  splitted_image_size: 16
+  mp_image_token_length: 1
+
+modality_projector:
+  pixel_shuffle_factor: 1
+  # Note: num_patches from ViT must be divisible by (pixel_shuffle_factor^2)
+  # 512x512 image = 32x32 patches = 1024 patches
+  # 1024 is divisible by 16 (4^2), so 1024 / 16 = 64 output tokens
 
 dataset:
   path: "nanovlm/data/minigrid/dataset.jsonl"
@@ -39,11 +45,11 @@ training:
   init_from_checkpoint: null
 
 grpo:
-  num_samples: 4        # candidate actions per state
-  temperature: 0.7
-  kl_coeff: 0.1
-  max_episodes: 1000
-  reward_baseline: "mean"
+  num_episodes: 100     # episodes per GRPO update
+  num_updates: 50       # total GRPO training iterations
+  kl_beta: 0.1          # KL divergence weight
+  entropy_weight: 0.01  # entropy regularization weight
+  num_trajectory_batch: 32  # trajectories per training batch
 
 env:
   name: "MiniGrid-Empty-8x8-v0"

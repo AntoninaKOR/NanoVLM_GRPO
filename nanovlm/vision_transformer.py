@@ -66,7 +66,24 @@ class ViTPatchEmbeddings(nn.Module):
         if self.cls_flag:
             cls_token = self.cls_token.expand(x.shape[0], -1, -1)
             x = torch.cat((cls_token, x), dim=1)
-        x = x + self.position_embedding
+
+        # Interpolate position embeddings if input resolution differs from pretrained
+        pos_embd = self.position_embedding
+        if pos_embd.size(1) != x.size(1):
+            # Reshape to 2D grid, interpolate, flatten back
+            cls_offset = 1 if self.cls_flag else 0
+            patch_pos = pos_embd[:, cls_offset:, :]  # [1, N_pretrain, D]
+            grid_size_pretrain = int(math.sqrt(patch_pos.size(1)))
+            grid_size_actual = int(math.sqrt(x.size(1) - cls_offset))
+            patch_pos = patch_pos.reshape(1, grid_size_pretrain, grid_size_pretrain, -1).permute(0, 3, 1, 2)
+            patch_pos = F.interpolate(patch_pos, size=(grid_size_actual, grid_size_actual), mode='bilinear', align_corners=False)
+            patch_pos = patch_pos.permute(0, 2, 3, 1).reshape(1, grid_size_actual * grid_size_actual, -1)
+            if self.cls_flag:
+                pos_embd = torch.cat([pos_embd[:, :1, :], patch_pos], dim=1)
+            else:
+                pos_embd = patch_pos
+
+        x = x + pos_embd
         return x
 
 
@@ -266,6 +283,9 @@ class ModalityProjector(nn.Module):
 
     Input:  (B, num_patches, vision_hidden_dim)
     Output: (B, num_patches // pixel_shuffle_factor^2, language_hidden_dim)
+    
+    Note: num_patches must be divisible by (pixel_shuffle_factor^2).
+          Validation should happen at model initialization.
     """
 
     def __init__(
@@ -278,38 +298,79 @@ class ModalityProjector(nn.Module):
         self.vision_hidden_size = vision_hidden_size
         self.language_hidden_size = language_hidden_size
         self.scale_factor = pixel_shuffle_factor
+        self.scale_factor_sq = pixel_shuffle_factor ** 2
 
-        self.proj = nn.Linear(
-            vision_hidden_size * (pixel_shuffle_factor ** 2),
-            language_hidden_size,
-            bias=False,
+        # Projection layer is created lazily since input dim depends on scale factor
+        self._proj = None
+        self._proj_input_dim = None
+
+    def _compute_effective_scale_factor(self, num_patches: int) -> int:
+        """Compute largest scale factor that divides num_patches evenly.
+        
+        Falls back to smaller factors if requested scale_factor is too large (e.g., in test configs).
+        """
+        # Try requested factor first
+        if num_patches % self.scale_factor_sq == 0:
+            return self.scale_factor
+        
+        # Find largest factor that works
+        for factor in range(self.scale_factor - 1, 0, -1):
+            if num_patches % (factor ** 2) == 0:
+                return factor
+        
+        # No shuffling possible
+        logger.warning(
+            f"Cannot apply pixel shuffle: num_patches={num_patches} has no suitable "
+            f"divisors. Skipping shuffle (scale_factor=1)."
         )
-        self.apply(self._init_weights)
+        return 1
 
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
+    def _get_proj(self, input_dim: int, device, dtype) -> nn.Linear:
+        """Lazily create or recreate projection layer matching actual input dim."""
+        if self._proj is None or self._proj_input_dim != input_dim:
+            self._proj = nn.Linear(input_dim, self.language_hidden_size, bias=False).to(device=device, dtype=dtype)
+            nn.init.normal_(self._proj.weight, mean=0.0, std=0.02)
+            self._proj_input_dim = input_dim
+        return self._proj
+
+    def output_token_count(self, num_patches: int) -> int:
+        """Compute how many tokens the projector outputs for a given number of input patches."""
+        effective_factor = self._compute_effective_scale_factor(num_patches)
+        return num_patches // (effective_factor ** 2)
 
     def pixel_shuffle(self, x: torch.Tensor) -> torch.Tensor:
-        """(B, H*W, C) -> (B, H/f * W/f, C * f^2)"""
+        """(B, H*W, C) -> (B, H/f * W/f, C * f^2).
+        
+        Adaptively reduces scale factor if needed for small sequences.
+        """
         bsz, seq, embed_dim = x.size()
         seq_root = int(seq ** 0.5)
         assert seq_root ** 2 == seq, f"Sequence length {seq} must be a perfect square"
-        assert seq_root % self.scale_factor == 0, f"sqrt(seq)={seq_root} must be divisible by scale_factor={self.scale_factor}"
+        
+        factor_root = self._compute_effective_scale_factor(seq)
+        
+        if factor_root <= 1:
+            return x  # No shuffling possible
 
         height = width = seq_root
-        x = x.view(bsz, height, width, embed_dim)
-        h_out = height // self.scale_factor
-        w_out = width // self.scale_factor
+        
+        if height % factor_root != 0 or width % factor_root != 0:
+            raise ValueError(
+                f"Grid dimensions ({height}x{width}) must be divisible by "
+                f"scale_factor ({factor_root})."
+            )
 
-        x = x.reshape(bsz, h_out, self.scale_factor, w_out, self.scale_factor, embed_dim)
+        x = x.view(bsz, height, width, embed_dim)
+        h_out = height // factor_root
+        w_out = width // factor_root
+
+        x = x.reshape(bsz, h_out, factor_root, w_out, factor_root, embed_dim)
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous()
-        x = x.reshape(bsz, h_out * w_out, embed_dim * self.scale_factor ** 2)
+        x = x.reshape(bsz, h_out * w_out, embed_dim * factor_root ** 2)
         return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.pixel_shuffle(x)
-        x = self.proj(x)
+        proj = self._get_proj(x.size(-1), x.device, x.dtype)
+        x = proj(x)
         return x

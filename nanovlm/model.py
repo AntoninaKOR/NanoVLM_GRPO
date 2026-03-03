@@ -100,8 +100,17 @@ class NanoVLMActionPredictor(nn.Module):
             language_hidden_size=language_hidden_size,
             pixel_shuffle_factor=4,
         )
+        # Compute actual mp_image_token_length from ViT patch size and projector
+        patch_size = self.vision_encoder.cfg.patch_size
+        num_patches_per_subimage = (splitted_image_size // patch_size) ** 2
+        computed_mp_len = self.modality_projector.output_token_count(num_patches_per_subimage)
+        if computed_mp_len != mp_image_token_length:
+            print(f"WARNING: config mp_image_token_length={mp_image_token_length} but "
+                  f"projector produces {computed_mp_len} tokens per sub-image. Using {computed_mp_len}.")
+            self.mp_image_token_length = computed_mp_len
+
         print(f"Vision encoder: {vit_model_type} (frozen, {vision_hidden_size}d)")
-        print(f"Modality projector: {vision_hidden_size} -> {language_hidden_size}")
+        print(f"Modality projector: {vision_hidden_size} -> {language_hidden_size} ({self.mp_image_token_length} tokens/sub-image)")
         
         # Store action token IDs for later extraction
         self.action_token_ids = {
@@ -153,24 +162,35 @@ class NanoVLMActionPredictor(nn.Module):
             batch_size = len(images)
             prompts = [self.prepare_prompt()] * batch_size
         
+        # Process images through image_processor to get patches
+        all_patches = []
+        all_grid_infos = []
+        for img in images:
+            if isinstance(img, np.ndarray):
+                img = Image.fromarray(img)
+            patches, grid_info = self.image_processor(img)
+            all_patches.append(patches)
+            all_grid_infos.append(grid_info)
+        
+        # Build image token string and prepend to prompts
+        image_str = get_image_string(self.tokenizer, all_grid_infos, self.mp_image_token_length)
+        full_prompts = [image_str + p for p in prompts]
+        
         text_inputs = self.tokenizer(
-            text=prompts,
+            text=full_prompts,
             return_tensors="pt",
             padding=True
         )
         
-        # Move text inputs to device
-        text_inputs = {k: v.to(self.model.device) for k, v in text_inputs.items()}
-        outputs = self.model(
-            **text_inputs,
-            labels=labels,
-            return_dict=True
-        )
+        input_ids = text_inputs["input_ids"].to(self.model.device)
+        attention_mask = text_inputs["attention_mask"].to(self.model.device)
         
-        return {
-            "logits": outputs.logits,
-            "loss": outputs.loss if labels is not None else None
-        }
+        return self.forward_with_vision(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            images=all_patches,
+        )
     
     def _process_images(self, images, device: torch.device) -> Optional[torch.Tensor]:
         """Normalize image input to a single tensor on device."""
@@ -222,15 +242,18 @@ class NanoVLMActionPredictor(nn.Module):
         outputs = self.model(
             inputs_embeds=token_embd,
             attention_mask=attention_mask,
-            labels=labels,
             return_dict=True,
         )
 
         loss = None
         if labels is not None:
+            # Standard causal-LM shift: logits[i] predicts labels[i+1].
+            # labels[i] = input_ids[i] for assistant tokens, -100 elsewhere.
+            shift_logits = outputs.logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
             loss = F.cross_entropy(
-                outputs.logits.view(-1, outputs.logits.size(-1)),
-                labels.view(-1),
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
                 ignore_index=-100,
             )
 
@@ -274,10 +297,41 @@ class NanoVLMActionPredictor(nn.Module):
         input_ids = text_inputs["input_ids"].to(self.model.device)
         attention_mask = text_inputs.get("attention_mask", torch.ones_like(input_ids)).to(self.model.device)
         
+        # Encode images through ViT + projector and replace <image> tokens
+        with torch.no_grad():
+            result = self.forward_with_vision(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                images=[patches],
+            )
+        
+        # Get the inputs_embeds that were used (re-compute for generation loop)
+        images_tensor = self._process_images([patches], input_ids.device)
+        token_embd = self.model.get_input_embeddings()(input_ids)
+        if images_tensor is not None:
+            image_features = self.vision_encoder(images_tensor)
+            image_embd = self.modality_projector(image_features)
+            token_embd = self._replace_image_tokens(input_ids, token_embd, image_embd)
+        
         generated_ids = input_ids.clone()
         
         with torch.no_grad():
-            for i in range(max_new_tokens):
+            # First forward with inputs_embeds (contains vision features)
+            outputs = self.model(
+                inputs_embeds=token_embd,
+                attention_mask=attention_mask,
+                return_dict=True,
+                use_cache=False
+            )
+            next_token_logits = outputs.logits[:, -1, :]
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            generated_ids = torch.cat([generated_ids, next_token], dim=-1)
+            attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
+            
+            # Subsequent tokens: use input_ids (no more image tokens to replace)
+            for i in range(max_new_tokens - 1):
+                if next_token.item() == self.tokenizer.eos_token_id:
+                    break
                 outputs = self.model(
                     input_ids=generated_ids,
                     attention_mask=attention_mask,
@@ -286,12 +340,9 @@ class NanoVLMActionPredictor(nn.Module):
                 )
                 
                 next_token_logits = outputs.logits[:, -1, :]
-                # Sample greedy
                 next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
                 generated_ids = torch.cat([generated_ids, next_token], dim=-1)
                 attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
-                if next_token.item() == self.tokenizer.eos_token_id:
-                    break
         
         # Decode generated text
         # TODO: implement for batch > 1

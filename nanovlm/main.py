@@ -54,16 +54,17 @@ def train_epoch(
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
+        images = batch.get("images", None)
         
-        # Forward pass
-        outputs = model.model(
+        # Forward pass 
+        outputs = model.forward_with_vision(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
-            return_dict=True,
+            images=images,
         )
         
-        loss = outputs.loss
+        loss = outputs["loss"]
         
         # Backward pass
         optimizer.zero_grad()
@@ -98,25 +99,26 @@ def validate(
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
+            images = batch.get("images", None)
             
-            outputs = model.model(
+            outputs = model.forward_with_vision(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=labels,
-                return_dict=True,
+                images=images,
             )
             
-            loss = outputs.loss
+            loss = outputs["loss"]
             total_loss += loss.item()
             
-            # Simple accuracy: check if predicted token matches label (simplified)
-            logits = outputs.logits
-            predictions = torch.argmax(logits, dim=-1)
+            # Accuracy with causal-LM shift: logits[i] predicts labels[i+1]
+            logits = outputs["logits"]
+            shift_preds = torch.argmax(logits[:, :-1, :], dim=-1)  # [B, T-1]
+            shift_labels = labels[:, 1:]                            # [B, T-1]
             
-            # Only count non-ignored labels
-            mask = labels != -100
+            mask = shift_labels != -100
             if mask.any():
-                correct += (predictions[mask] == labels[mask]).sum().item()
+                correct += (shift_preds[mask] == shift_labels[mask]).sum().item()
                 total += mask.sum().item()
             
             progress_bar.set_postfix({"loss": loss.item()})
@@ -530,6 +532,7 @@ def main():
     if args.prompt_type is not None:
         prompt_type = args.prompt_type
     env_cfg = cfg["env"]
+    grpo_cfg = cfg.get("grpo", {})
     eval_cfg = cfg.get("eval", {})
     eval_episodes = args.eval_episodes if args.eval_episodes is not None else eval_cfg.get("num_episodes", 5)
     eval_max_steps = args.eval_max_steps if args.eval_max_steps is not None else eval_cfg.get("max_steps", 20)
@@ -576,14 +579,14 @@ def main():
         dtype=model_cfg["dtype"],
         vit_model_type=model_cfg.get("vit_model_type", "google/siglip2-base-patch16-512"),
     )
-    model.model.to(device)
+    model.to(device) 
 
     # Load dataset
     dataset, collator = get_dataset_and_collator(
         dataset_path=data_cfg["path"],
         tokenizer=tokenizer,
         image_processor_config=img_cfg,
-        mp_image_token_length=img_cfg["mp_image_token_length"],
+        mp_image_token_length=model.mp_image_token_length,
         mode=model_cfg["mode"],
         max_length=data_cfg["max_length"],
         prompt_type=prompt_type,
@@ -615,9 +618,10 @@ def main():
         num_workers=train_cfg["num_workers"],
     )
 
-    # Optimizer & scheduler (only LoRA / trainable parameters)
+    trainable_params = [p for p in model.model.parameters() if p.requires_grad]
+    trainable_params += list(model.modality_projector.parameters())
     optimizer = torch.optim.AdamW(
-        [p for p in model.model.parameters() if p.requires_grad],
+        trainable_params,
         lr=train_cfg["lr"],
         weight_decay=train_cfg["weight_decay"],
     )
@@ -650,6 +654,7 @@ def main():
             output_dir,
             args.checkpoint,
             train_cfg,
+            grpo_cfg,
             env_cfg,
             model_cfg,
             tokenizer,
@@ -767,6 +772,7 @@ def _train_grpo(
     output_dir,
     checkpoint_path,
     train_cfg,
+    grpo_cfg,
     env_cfg,
     model_cfg,
     tokenizer,
@@ -797,9 +803,6 @@ def _train_grpo(
     
     # Setup environment
     env = MiniGridRLEnv(env_id=env_cfg.get("name", "MiniGrid-Empty-8x8-v0"))
-    
-    # Setup GRPO config with CLI overrides
-    grpo_cfg = train_cfg.get("grpo", {})
     
     # Use CLI arguments if provided, else fallback to config
     effective_kl_beta = kl_beta if kl_beta is not None else grpo_cfg.get("kl_beta", 0.1)

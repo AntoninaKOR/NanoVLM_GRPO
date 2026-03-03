@@ -38,8 +38,9 @@ class DirectActionGRPOTrainer:
         self.tokenizer = tokenizer
         
         # Optimizer for policy
-        # Filter to only trainable parameters (LoRA adapters)
+        # LoRA adapters + modality projector (vision encoder is frozen)
         trainable_params = [param for param in self.model.model.parameters() if param.requires_grad]
+        trainable_params += list(self.model.modality_projector.parameters())
         total_params = sum(p.numel() for p in self.model.model.parameters())
         trainable_param_count = sum(p.numel() for p in trainable_params)
         logger.info(f"Optimizer - Total params: {total_params:,} | Trainable: {trainable_param_count:,} ({100*trainable_param_count/total_params:.2f}%)")

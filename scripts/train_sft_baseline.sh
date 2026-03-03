@@ -1,42 +1,37 @@
-#!/usr/bin/env bash
-# SFT (Supervised Fine-Tuning) baseline training
-# Stage 1: Train NanoVLM to predict actions from observations using imitation learning
-set -euo pipefail
+#!/bin/bash
 
-cd "$(dirname "$0")/.."
+set -e
 
 echo "=========================================="
-echo "Stage 1: SFT Baseline Training"
+echo "Training NanoVLM SFT Baseline"
+echo "Using simple prompt (no state description)"
 echo "=========================================="
-echo ""
-echo "This script trains NanoVLM to predict actions"
-echo "using supervised learning on expert trajectories."
+
+DATASET=${1:-"nanovlm/data/minigrid/dataset.jsonl"}
+EPOCHS=${2:-5}
+BATCH_SIZE=${3:-8}
+LR=${4:-1e-4}
+OUTPUT_DIR=${5:-"nanovlm/checkpoints/sft_baseline"}
+
+echo "Dataset: $DATASET"
+echo "Epochs: $EPOCHS"
+echo "Batch size: $BATCH_SIZE"
+echo "Learning rate: $LR"
+echo "Output dir: $OUTPUT_DIR"
 echo ""
 
+# Run training
 python -m nanovlm.main \
-    --method sft \
-    --dataset nanovlm/data/minigrid_small/dataset.jsonl \
-    --val-split 0.2 \
-    --mode action \
-    --use-lora \
-    --lora-r 8 \
-    --lora-alpha 16 \
-    --epochs 10 \
-    --batch-size 8 \
-    --lr 5e-5 \
-    --warmup-steps 100 \
-    --output-dir nanovlm/checkpoints/sft_baseline \
-    --save-interval 1 \
-    --seed 42 \
-    --device auto
+    --dataset "$DATASET" \
+    --epochs "$EPOCHS" \
+    --batch-size "$BATCH_SIZE" \
+    --lr "$LR" \
+    --output-dir "$OUTPUT_DIR" 
 
 echo ""
 echo "=========================================="
-echo "SFT Training Complete!"
+echo "Training completed!"
+echo "Checkpoints saved to: $OUTPUT_DIR"
+echo "Learning curves saved to: $OUTPUT_DIR/learning_curves.png"
+echo "GIFs saved to: $OUTPUT_DIR/gifs_epoch_*/"
 echo "=========================================="
-echo "Checkpoint saved to: nanovlm/checkpoints/sft_baseline/best_model"
-echo "Metrics saved to: nanovlm/checkpoints/sft_baseline/metrics.json"
-echo ""
-echo "Next steps:"
-echo "  1. For GRPO (action mode): bash scripts/train_grpo_action.sh"
-echo "  2. For GRPO (text+action): bash scripts/train_grpo_text_action.sh"
