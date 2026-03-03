@@ -229,7 +229,8 @@ def evaluate_in_env(
                 optimal_action = action_to_next(base_env, path[1])
 
             frame = obs["image"]  # Partial observation (POMDP)
-            action_id = model.predict_action(frame)
+            patches = model.preprocess_image(frame)
+            action_id = model.predict_action(patches)
 
             if optimal_action is not None:
                 total_steps += 1

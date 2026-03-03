@@ -64,7 +64,8 @@ class DirectActionGRPOTrainer:
     
     def policy_fn(self, observation: np.ndarray) -> int:
         """Policy function using model's built-in predict_action."""
-        return self.model.predict_action(observation)
+        patches = self.model.preprocess_image(observation)
+        return self.model.predict_action(patches)
     
     def collect_trajectories(
         self,

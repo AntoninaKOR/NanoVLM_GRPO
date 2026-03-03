@@ -46,16 +46,8 @@ class ModelEvaluator:
         Returns:
             Action ID
         """
-        from PIL import Image
-        
-        if isinstance(observation, np.ndarray):
-            if observation.dtype != np.uint8:
-                observation = (observation * 255).astype(np.uint8)
-            image = Image.fromarray(observation)
-        else:
-            image = observation
-        
-        action = self.model.predict_action(image)
+        patches = self.model.preprocess_image(observation)
+        action = self.model.predict_action(patches)
         return action
     
     def evaluate(

@@ -12,6 +12,9 @@ import numpy as np
 from .processors import get_image_processor, get_image_string
 from .vision_transformer import ViT, ModalityProjector
 
+# Image input: tensor [B, C, H, W], list of tensors, list of PIL Images, or list of np arrays
+ImageInput = Union[torch.Tensor, List[torch.Tensor], List[Image.Image], List[np.ndarray]]
+
 # MiniGrid action space
 ACTIONS = {
     0: "turn_left",
@@ -145,18 +148,20 @@ class NanoVLMActionPredictor(nn.Module):
     
     def forward(
         self,
-        images: List[Image.Image],
+        images: ImageInput,
         prompts: Optional[List[str]] = None,
         labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """
+        Batch forward pass for SFT training with labels.
+        
         Args:
-            images: List of images (PIL Images)
-            prompts: Optional text prompts (default uses self.prepare_prompt())
-            labels: Ground truth token IDs for computing loss
+            images: Batch of images 
+            prompts: Batch of text prompts (default uses self.prepare_prompt())
+            labels: Batch of ground truth token IDs [batch_size, seq_len] for computing loss
         
         Returns:
-            Dictionary with 'logits' and optionally 'loss'
+            Dictionary with 'logits' [batch_size, seq_len, vocab_size] and 'loss' (if labels provided)
         """
         if prompts is None:
             batch_size = len(images)
@@ -192,10 +197,12 @@ class NanoVLMActionPredictor(nn.Module):
             images=all_patches,
         )
     
-    def _process_images(self, images, device: torch.device) -> Optional[torch.Tensor]:
-        """Normalize image input to a single tensor on device."""
+    def _process_images(self, images: Optional[ImageInput], device: torch.device) -> Optional[torch.Tensor]:
+        """Normalize image input (tensor, list of tensors, or None) to a single tensor on device."""
         if images is None:
             return None
+        if isinstance(images, torch.Tensor):
+            return images.to(device)
         if isinstance(images, list):
             if images and isinstance(images[0], list):
                 images = [img for sublist in images for img in sublist]
@@ -218,15 +225,23 @@ class NanoVLMActionPredictor(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
-        images: Optional[torch.Tensor] = None,
+        images: Optional[ImageInput] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Multimodal forward pass following example_nanovlm VisionLanguageModel pattern.
-
+        """Batch multimodal forward pass following example_nanovlm VisionLanguageModel pattern.
         Pipeline:
-            1. Encode images: ViT(images) -> [B, num_patches, D_vit]
+            1. Encode images: ViT(images) -> [N_images, num_patches, D_vit]
             2. Project: ModalityProjector(image_features) -> [N_images, mp_token_len, D_lm]
             3. Get text embeddings and replace <image> tokens with projected image embeddings
             4. Forward combined embeddings through language model
+
+        Args:
+            input_ids: Batch of token IDs [batch_size, seq_len]
+            attention_mask: Batch of attention masks [batch_size, seq_len]
+            labels: Optional batch of labels [batch_size, seq_len] for loss computation
+            images: Optional list of image tensors to encode
+        
+        Returns:
+            Dict with 'logits' [batch_size, seq_len, vocab_size] and 'loss' if labels provided
         """
         images_tensor = self._process_images(images, input_ids.device)
         token_embd = self.model.get_input_embeddings()(input_ids)  # [B, T, D_lm]
@@ -259,60 +274,93 @@ class NanoVLMActionPredictor(nn.Module):
 
         return {"logits": outputs.logits, "loss": loss}
     
-    def predict_action(
+    def batch_predict_action_logits(
         self,
-        image: Union[Image.Image, np.ndarray],
-        return_text: bool = False,
-        max_new_tokens: Optional[int] = None,
-    ) -> Union[int, Tuple[int, str]]:
+        images: ImageInput,
+        prompts: Optional[List[str]] = None,
+    ) -> torch.Tensor:
         """
-        Predict action from a single observation.
+        Batch forward pass optimized for GRPO training.
+        Returns action logits for policy gradient computation.
         
         Args:
-            image: Single observation image
+            images: Batch of images (torch.Tensor [B,C,H,W], List[torch.Tensor], List[PIL.Image], or List[np.ndarray])
+            prompts: Optional text prompts (default uses self.prepare_prompt())
+        
+        Returns:
+            Action logits tensor of shape [batch_size, num_actions]
+        """
+        # Use forward() to get model logits
+        output = self.forward(images=images, prompts=prompts, labels=None)
+        logits = output["logits"]  # [batch_size, seq_len, vocab_size]
+        
+        # Extract logits for action tokens at last position
+        batch_size = logits.shape[0]
+        last_logits = logits[:, -1, :]  # [batch_size, vocab_size]
+        
+        action_logits = []
+        for action_name in sorted(self.action_token_ids.keys()):
+            token_id = self.action_token_ids[action_name]
+            action_logits.append(last_logits[:, token_id])
+        
+        return torch.stack(action_logits, dim=1)  # [batch_size, num_actions]
+    
+    def predict_action(
+        self,
+        image: Union[torch.Tensor, List[torch.Tensor]],
+        return_text: bool = False,
+        max_new_tokens: Optional[int] = None,
+    ) -> Union[int, Tuple[int, str], List[int], List[Tuple[int, str]]]:
+        """
+        Predict action from observation(s).
+        
+        Args:
+            image: Preprocessed image patches from self.image_processor.
+                   Single tensor [N_sub, C, H, W] or list of such tensors.
             return_text: If True, also return generated text
             max_new_tokens: Max tokens to generate. If None, set based on mode:
                 - 'action' mode: 1 token (only action)
                 - 'text_action' mode: 50 tokens (description + action)
         
         Returns:
-            action_id: Integer action ID (0-6)
-            text (optional): Generated text if return_text=True
+            Single sample: action_id (int) or (action_id, text)
+            Batch: List of action_ids or list of (action_id, text)
         """
         # Set max_new_tokens based on mode if not provided
         if max_new_tokens is None:
             max_new_tokens = 1 if self.mode == "action" else 50
         
-        # Convert numpy array to PIL Image if needed
-        if isinstance(image, np.ndarray):
-            image = Image.fromarray(image)
-
-        prompt = self.prepare_prompt()
-        patches, grid_info = self.image_processor(image)
-
-        # Build image token string 
-        image_str = get_image_string(self.tokenizer, [grid_info], self.mp_image_token_length)
-        text = image_str + prompt
-
+        # Handle both single and batch inputs
+        is_single = not isinstance(image, list)
+        all_patches = [image] if is_single else image
+        batch_size = len(all_patches)
+        
+        # Get grid_info from patch shapes (n_sub_images -> grid dimensions)
+        all_grid_infos = []
+        for patches in all_patches:
+            n_sub = patches.shape[0]
+            # Reconstruct grid info: assume square grid
+            n_h = int(n_sub ** 0.5)
+            n_w = n_sub // n_h
+            all_grid_infos.append((n_h, n_w))
+        
+        # Build prompts
+        prompts = [self.prepare_prompt()] * batch_size
+        image_str = get_image_string(self.tokenizer, all_grid_infos, self.mp_image_token_length)
+        full_prompts = [image_str + p for p in prompts]
+        
         text_inputs = self.tokenizer(
-            text=[text],
+            text=full_prompts,
             return_tensors="pt",
             padding=True
         )
         
         input_ids = text_inputs["input_ids"].to(self.model.device)
-        attention_mask = text_inputs.get("attention_mask", torch.ones_like(input_ids)).to(self.model.device)
+        attention_mask = text_inputs["attention_mask"].to(self.model.device)
+        prompt_lens = input_ids.shape[1]  # All prompts have same length after padding
         
-        # Encode images through ViT + projector and replace <image> tokens
-        with torch.no_grad():
-            result = self.forward_with_vision(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                images=[patches],
-            )
-        
-        # Get the inputs_embeds that were used (re-compute for generation loop)
-        images_tensor = self._process_images([patches], input_ids.device)
+        # Get embeddings with vision features
+        images_tensor = self._process_images(all_patches, input_ids.device)
         token_embd = self.model.get_input_embeddings()(input_ids)
         if images_tensor is not None:
             image_features = self.vision_encoder(images_tensor)
@@ -336,7 +384,7 @@ class NanoVLMActionPredictor(nn.Module):
             
             # Subsequent tokens: use input_ids (no more image tokens to replace)
             for i in range(max_new_tokens - 1):
-                if next_token.item() == self.tokenizer.eos_token_id:
+                if (next_token == self.tokenizer.eos_token_id).all():
                     break
                 outputs = self.model(
                     input_ids=generated_ids,
@@ -349,23 +397,48 @@ class NanoVLMActionPredictor(nn.Module):
                 next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
                 generated_ids = torch.cat([generated_ids, next_token], dim=-1)
                 attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
-                if next_token.item() == self.tokenizer.eos_token_id:
-                    break
         
-        # Decode only the newly generated tokens (exclude prompt + image tokens)
-        prompt_len = input_ids.shape[1]
-        generated_only = generated_ids[0][prompt_len:]
-        generated_text = self.tokenizer.decode(
-            generated_only,
-            skip_special_tokens=False
-        )
+        # Extract actions for each sample in batch
+        action_ids = []
+        generated_texts = []
         
-        action_id = self._extract_action(generated_text)
+        for batch_idx in range(batch_size):
+            # Decode only newly generated tokens
+            generated_only = generated_ids[batch_idx][prompt_lens:]
+            generated_text = self.tokenizer.decode(
+                generated_only,
+                skip_special_tokens=False
+            )
+            generated_texts.append(generated_text)
+            action_id = self._extract_action(generated_text)
+            action_ids.append(action_id)
         
-        if return_text:
-            return action_id, generated_text
-        return action_id
+        # Return in original format (single or batch)
+        if is_single:
+            if return_text:
+                return action_ids[0], generated_texts[0]
+            return action_ids[0]
+        else:
+            if return_text:
+                return list(zip(action_ids, generated_texts))
+            return action_ids
     
+    def preprocess_image(self, image: Union[Image.Image, np.ndarray]) -> torch.Tensor:
+        """Convert a raw image (PIL or np.ndarray) to preprocessed patches tensor.
+        
+        Args:
+            image: Raw image as PIL Image or np.ndarray [H, W, C]
+        
+        Returns:
+            Patches tensor [N_sub, C, H, W] ready for predict_action()
+        """
+        if isinstance(image, np.ndarray):
+            if image.dtype != np.uint8:
+                image = (image * 255).astype(np.uint8)
+            image = Image.fromarray(image)
+        patches, grid_info = self.image_processor(image)
+        return patches
+
     def _extract_action(self, text: str) -> int:
         """Extract action ID from generated text."""
         # Look for action tokens in the text
@@ -473,5 +546,6 @@ if __name__ == "__main__":
     print(f"Action tokens: {model.action_token_ids}")
     
     # Test prediction
-    action = model.predict_action(dummy_image, return_text=True)
+    patches = model.preprocess_image(dummy_image)
+    action = model.predict_action(patches, return_text=True)
     print(f"Predicted action: {action}")
