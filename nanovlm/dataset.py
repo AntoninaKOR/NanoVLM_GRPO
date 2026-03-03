@@ -176,15 +176,11 @@ class BaseMiniGridDataset(Dataset):
         
         # Check if we found any assistant tokens
         num_trainable = sum(1 for l in labels if l != IGNORE_INDEX)
-        logger.debug(f"Trainable tokens: {num_trainable} / {len(labels)}")
-        
-
         return (
             torch.tensor(input_ids, dtype=torch.long),
             torch.tensor(labels, dtype=torch.long),
             torch.tensor(conv_ids["attention_mask"], dtype=torch.long)
         )
-
     def _process_item(self, item: Dict) -> Optional[Dict[str, torch.Tensor]]:
         """Process a single example into model inputs.
         
